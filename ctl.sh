@@ -59,6 +59,20 @@ cmd_build() {
   ok "빌드 완료"
 }
 
+cmd_pull() {
+  header "▶ GitHub에서 최신 코드 가져오기"
+  if [[ ! -d "${ROOT_DIR}/.git" ]]; then
+    error ".git 디렉토리가 없습니다. git 저장소가 아닙니다."
+    exit 1
+  fi
+  info "git pull origin main..."
+  git -C "${ROOT_DIR}" pull origin main
+  ok "코드 업데이트 완료"
+  echo ""
+  # 코드 변경 후 자동으로 재배포
+  cmd_deploy
+}
+
 cmd_deploy() {
   header "▶ 배포 시작"
   check_env
@@ -164,7 +178,8 @@ cmd_help() {
   echo "    start          서비스 시작"
   echo "    stop           서비스 중지"
   echo "    restart        서비스 재시작"
-  echo "    deploy         이미지 빌드 + 재시작 (코드 변경 후)"
+  echo "    pull           GitHub에서 최신 코드 pull + 자동 재배포"
+  echo "    deploy         이미지 빌드 + 재시작 (로컬 코드 기준)"
   echo "    build          이미지 빌드만"
   echo "    status         실행 상태 + 헬스체크 + 인증서 만료일"
   echo ""
@@ -178,7 +193,8 @@ cmd_help() {
   echo "    backup         storage 디렉토리 백업 (7일 자동 삭제)"
   echo ""
   echo -e "  ${BOLD}예시${NC}"
-  echo "    ./ctl.sh deploy             # 코드 업데이트 후 재배포"
+  echo "    ./ctl.sh pull               # GitHub에서 최신 코드 받아서 재배포"
+  echo "    ./ctl.sh deploy             # 로컬 코드 기준으로 재배포"
   echo "    ./ctl.sh logs app 100       # 앱 로그 100줄"
   echo "    ./ctl.sh logs nginx         # nginx 로그"
   echo "    ./ctl.sh backup             # 수동 백업"
@@ -193,6 +209,7 @@ case "$CMD" in
   start)       cmd_start ;;
   stop)        cmd_stop ;;
   restart)     cmd_restart ;;
+  pull)        cmd_pull ;;
   deploy)      cmd_deploy ;;
   build)       cmd_build ;;
   status)      cmd_status ;;
