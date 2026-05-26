@@ -1,0 +1,26 @@
+{
+  "name": "Document Translate Agent",
+  "short_name": "DocTranslate",
+  "description": "문서를 업로드하고 AI로 번역합니다",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f5f7f8",
+  "theme_color": "#146c63",
+  "lang": "ko",
+  "icons": [
+    {
+      "src": "/static/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
