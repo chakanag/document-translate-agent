@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>관리자 패널 — Document Translate Agent</title>
+    <meta name="theme-color" content="#146c63" />
+    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      .admin-shell { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
+      .admin-topbar {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 28px; flex-wrap: wrap; gap: 12px;
+      }
+      .admin-topbar h1 { font-size: 22px; color: var(--ink); }
+      .badge-admin {
+        background: var(--accent); color: #fff; font-size: 11px;
+        font-weight: 700; padding: 3px 8px; border-radius: 4px; vertical-align: middle;
+      }
+      .topbar-actions { display: flex; gap: 10px; align-items: center; }
+      .btn-back, .btn-logout {
+        min-height: 36px; padding: 0 14px; border-radius: 6px; font-size: 13px;
+        cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--ink);
+      }
+      .btn-logout { background: var(--error); color: #fff; border-color: var(--error); }
+
+      /* 통계 카드 */
+      .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 32px; }
+      .stat-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 20px 18px; }
+      .stat-label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+      .stat-value { font-size: 32px; font-weight: 700; color: var(--ink); margin-top: 6px; line-height: 1; }
+      .stat-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+      /* 섹션 */
+      .admin-section { margin-bottom: 36px; }
+      .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+      .section-header h2 { font-size: 16px; }
+
+      /* 테이블 */
+      .data-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff;
+        border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+      .data-table th { background: #f0f4f6; padding: 10px 14px; text-align: left; font-weight: 600;
+        color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .data-table td { padding: 10px 14px; border-top: 1px solid #edf1f4; vertical-align: middle; }
+      .data-table tr:hover td { background: #fafcfd; }
+
+      .role-badge { display: inline-flex; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+      .role-admin { background: #e0f4f2; color: var(--accent-strong); }
+      .role-user { background: #edf1f4; color: var(--muted); }
+
+      .status-active { color: #1a9e6a; font-weight: 600; }
+      .status-inactive { color: var(--error); font-weight: 600; }
+
+      .action-btn {
+        min-height: 28px; padding: 0 10px; border-radius: 5px; font-size: 12px;
+        cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--ink); margin-right: 4px;
+      }
+      .action-btn.danger { border-color: var(--error); color: var(--error); }
+      .action-btn.danger:hover { background: var(--error); color: #fff; }
+      .action-btn:hover { background: #edf1f4; }
+
+      .empty-row td { text-align: center; color: var(--muted); padding: 24px; }
+      .loading-text { color: var(--muted); font-size: 13px; }
+
+      /* 잡 상태 */
+      .job-status { display: inline-flex; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+      .job-status.completed { background: #e0f4f2; color: var(--accent-strong); }
+      .job-status.failed { background: #fde8e8; color: var(--error); }
+      .job-status.queued, .job-status.translating, .job-status.extracting { background: #fff3cd; color: #856404; }
+
+      @media (max-width: 760px) {
+        .stats-grid { grid-template-columns: repeat(2, 1fr); }
+        .data-table { font-size: 12px; }
+        .data-table th, .data-table td { padding: 8px 10px; }
+      }
+    </style>
+  </head>
+  <body style="background: var(--bg);">
+    <div class="admin-shell">
+      <div class="admin-topbar">
+        <div>
+          <h1>관리자 패널 <span class="badge-admin">ADMIN</span></h1>
+          <p style="color:var(--muted);font-size:13px;margin-top:4px" id="adminUserInfo"></p>
+        </div>
+        <div class="topbar-actions">
+          <a href="/" class="btn-back">← 메인으로</a>
+          <button class="btn-logout" id="logoutBtn">로그아웃</button>
+        </div>
+      </div>
+
+      <!-- 통계 -->
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat-card"><div class="stat-label">총 유저</div><div class="stat-value" id="statUsers">—</div></div>
+        <div class="stat-card"><div class="stat-label">활성 유저</div><div class="stat-value" id="statActiveUsers">—</div></div>
+        <div class="stat-card"><div class="stat-label">총 번역 작업</div><div class="stat-value" id="statJobs">—</div></div>
+        <div class="stat-card"><div class="stat-label">완료</div><div class="stat-value" id="statCompleted">—</div><div class="stat-sub" id="statSuccessRate"></div></div>
+        <div class="stat-card"><div class="stat-label">스토리지</div><div class="stat-value" id="statStorage">—</div><div class="stat-sub">MB 사용 중</div></div>
+      </div>
+
+      <!-- 유저 목록 -->
+      <div class="admin-section">
+        <div class="section-header">
+          <h2>유저 관리</h2>
+          <button class="action-btn" id="refreshUsers">↻ 새로고침</button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>이름</th><th>이메일</th><th>역할</th><th>상태</th><th>가입일</th><th>작업</th>
+            </tr>
+          </thead>
+          <tbody id="usersBody"><tr class="empty-row"><td colspan="6">불러오는 중...</td></tr></tbody>
+        </table>
+      </div>
+
+      <!-- 번역 작업 목록 -->
+      <div class="admin-section">
+        <div class="section-header">
+          <h2>전체 번역 작업</h2>
+          <button class="action-btn" id="refreshJobs">↻ 새로고침</button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>파일명</th><th>사용자</th><th>언어</th><th>상태</th><th>생성일</th><th>작업</th>
+            </tr>
+          </thead>
+          <tbody id="jobsBody"><tr class="empty-row"><td colspan="6">불러오는 중...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script src="/static/admin.js"></script>
+  </body>
+</html>
