@@ -1,0 +1,2 @@
+uvicorn>=0.39.0
+webauthn>=2.1.0

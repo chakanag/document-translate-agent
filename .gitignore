@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Storage (런타임 데이터 — DB, 업로드 파일, 내보내기)
+storage/originals/
+storage/blocks/
+storage/exports/
+storage/*.sqlite3
+storage/pycache/
+
+# 환경변수 / 시크릿
+.env
+*.pem
+*.key
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+deploy/.env
+
+# 로그 / 런타임 파일
+*.log
+.server.log
+.server.pid
