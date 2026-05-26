@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Document Translate Agent</title>
+    <meta name="theme-color" content="#146c63" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="DocTranslate" />
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.svg" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>Document Translate Agent</h1>
+            <p>문서를 업로드하고 번역 결과를 미리 본 뒤 원하는 형식으로 내려받습니다.</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button id="refreshHistory" class="icon-button" title="이력 새로고침">↻</button>
+            <a id="adminLink" href="/static/admin.html" hidden
+               style="min-height:36px;padding:0 12px;border-radius:6px;font-size:12px;font-weight:700;background:#146c63;color:#fff;border:none;text-decoration:none;display:inline-flex;align-items:center;">
+              관리자 패널
+            </a>
+            <button id="logoutBtn" style="min-height:36px;padding:0 12px;border-radius:6px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line);">
+              로그아웃
+            </button>
+          </div>
+        </header>
+
+        <section class="panel upload-panel">
+          <form id="uploadForm">
+            <label class="file-drop">
+              <input id="fileInput" name="file" type="file" accept=".pdf,.doc,.docx,.txt,.md,.xls,.xlsx" required />
+              <span id="fileLabel">PDF, DOC, TXT, MD, XLS 문서를 선택하세요</span>
+            </label>
+
+            <div class="controls">
+              <label>
+                AI 선택
+                <select id="aiProvider" name="aiProvider">
+                  <option value="demo">Provider 확인 중</option>
+                </select>
+              </label>
+
+              <label>
+                최종 번역 언어
+                <select id="targetLanguage" name="targetLanguage">
+                  <option value="ko">한국어</option>
+                  <option value="ja">일본어</option>
+                  <option value="en">영어</option>
+                  <option value="zh">중국어</option>
+                  <option value="vi">베트남어</option>
+                </select>
+              </label>
+
+              <label>
+                다운로드 형식
+                <select id="outputFormat" name="outputFormat">
+                  <option value="pdf">PDF</option>
+                  <option value="docx">DOCX</option>
+                  <option value="txt">TXT</option>
+                  <option value="md">MD</option>
+                  <option value="xlsx">XLSX</option>
+                </select>
+              </label>
+
+              <button id="uploadButton" type="submit">번역 시작</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="status-row" id="statusRow">
+          <span id="statusText">대기 중</span>
+        </section>
+
+        <!-- 뷰 모드 탭 -->
+        <div class="view-tabs">
+          <button class="tab-btn active" data-view="text" id="tabText">
+            <span class="tab-icon">📝</span> 텍스트 뷰
+          </button>
+          <button class="tab-btn" data-view="doc" id="tabDoc">
+            <span class="tab-icon">📄</span> 문서 미리보기
+          </button>
+        </div>
+
+        <!-- ── 텍스트 뷰 ── -->
+        <section class="preview-grid view-panel" id="viewText">
+          <article class="panel preview-panel">
+            <header class="panel-header">
+              <h2>원문</h2>
+              <span id="sourceMeta"></span>
+            </header>
+            <div id="sourcePreview" class="preview-list empty">업로드 후 원문이 표시됩니다.</div>
+          </article>
+
+          <article class="panel preview-panel">
+            <header class="panel-header">
+              <h2>번역</h2>
+              <div class="panel-header-right">
+                <span id="targetMeta"></span>
+                <button id="editToggle" class="edit-btn" hidden>✏️ 편집</button>
+              </div>
+            </header>
+            <div id="editBar" class="edit-bar" hidden>
+              <span class="edit-hint">번역 텍스트를 직접 수정한 뒤 저장하세요.</span>
+              <div class="edit-bar-actions">
+                <button id="saveEditsButton" class="btn-save">💾 수정 저장</button>
+                <button id="cancelEditButton" class="btn-cancel">취소</button>
+              </div>
+            </div>
+            <div id="targetPreview" class="preview-list empty">업로드 후 번역 미리보기가 표시됩니다.</div>
+          </article>
+        </section>
+
+        <!-- ── 문서 미리보기 뷰 ── -->
+        <section class="preview-grid view-panel" id="viewDoc" hidden>
+          <article class="panel preview-panel doc-preview-panel">
+            <header class="panel-header">
+              <h2>원본 문서</h2>
+              <span id="docSourceMeta"></span>
+            </header>
+            <div id="docSourceContainer" class="doc-embed-container">
+              <p class="doc-placeholder">번역 후 원본 문서 미리보기가 표시됩니다.</p>
+            </div>
+          </article>
+
+          <article class="panel preview-panel doc-preview-panel">
+            <header class="panel-header">
+              <h2>번역된 문서</h2>
+              <span id="docTargetMeta"></span>
+            </header>
+            <div id="docTargetContainer" class="doc-embed-container">
+              <p class="doc-placeholder">번역 후 문서 미리보기가 표시됩니다.</p>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel action-panel">
+          <div>
+            <h2>다운로드</h2>
+            <p id="downloadHint">미리보기 생성 후 export 할 수 있습니다.</p>
+          </div>
+          <div class="download-actions">
+            <button id="exportButton" disabled>문서 생성</button>
+            <a id="downloadLink" class="download-link disabled" href="#">다운로드</a>
+          </div>
+        </section>
+      </section>
+
+      <aside class="history">
+        <header>
+          <h2>이력</h2>
+        </header>
+        <div id="historyList" class="history-list"></div>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

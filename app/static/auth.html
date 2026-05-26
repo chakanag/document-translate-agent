@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>로그인 — Document Translate Agent</title>
+    <meta name="theme-color" content="#146c63" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+      .auth-card {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 36px 32px;
+        width: 100%;
+        max-width: 400px;
+        margin: 20px;
+      }
+      .auth-logo { text-align: center; margin-bottom: 28px; }
+      .auth-logo h1 { font-size: 22px; color: var(--accent); margin-bottom: 4px; }
+      .auth-logo p { font-size: 13px; color: var(--muted); margin: 0; }
+      .auth-tabs { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 2px solid var(--line); }
+      .auth-tab {
+        flex: 1; padding: 10px; text-align: center; cursor: pointer;
+        font-size: 14px; font-weight: 600; color: var(--muted);
+        border: none; background: none; border-bottom: 2px solid transparent; margin-bottom: -2px;
+      }
+      .auth-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+      .auth-form { display: none; flex-direction: column; gap: 16px; }
+      .auth-form.active { display: flex; }
+      .field { display: flex; flex-direction: column; gap: 6px; }
+      .field label { font-size: 13px; color: var(--muted); font-weight: 500; }
+      .field input {
+        border: 1px solid var(--line); border-radius: 6px; padding: 0 12px;
+        min-height: 44px; font: inherit; font-size: 15px; color: var(--ink);
+        outline: none; transition: border-color 0.15s;
+      }
+      .field input:focus { border-color: var(--accent); }
+      .auth-btn {
+        min-height: 48px; border-radius: 8px; font-size: 15px; font-weight: 600;
+        background: var(--accent); color: #fff; border: none; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; gap: 8px;
+      }
+      .auth-btn:hover { background: var(--accent-strong); }
+      .auth-btn:disabled { background: #c8d2d8; cursor: not-allowed; }
+      .passkey-icon { font-size: 20px; }
+      .auth-msg { font-size: 13px; text-align: center; min-height: 20px; }
+      .auth-msg.error { color: var(--error); }
+      .auth-msg.ok { color: var(--accent); }
+      .no-passkey { background: #fff8e1; border: 1px solid #f0d97a; border-radius: 8px;
+        padding: 14px; font-size: 13px; color: var(--warn); display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="auth-card">
+      <div class="auth-logo">
+        <h1>Document Translate</h1>
+        <p>패스키로 안전하게 로그인하세요</p>
+      </div>
+
+      <div class="no-passkey" id="noPasskey">
+        ⚠️ 이 브라우저는 패스키(WebAuthn)를 지원하지 않습니다.<br>
+        최신 Chrome, Safari, Firefox를 사용해 주세요.
+      </div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">로그인</button>
+        <button class="auth-tab" data-tab="register">회원가입</button>
+      </div>
+
+      <!-- 로그인 -->
+      <form class="auth-form active" id="loginForm" autocomplete="on">
+        <div class="field">
+          <label for="loginUsername">사용자 이름</label>
+          <input id="loginUsername" type="text" placeholder="username" autocomplete="username" required />
+        </div>
+        <p class="auth-msg" id="loginMsg"></p>
+        <button class="auth-btn" type="submit" id="loginBtn">
+          <span class="passkey-icon">🔑</span> 패스키로 로그인
+        </button>
+      </form>
+
+      <!-- 회원가입 -->
+      <form class="auth-form" id="registerForm" autocomplete="on">
+        <div class="field">
+          <label for="regUsername">사용자 이름 <small style="color:#a0b0b8">(영문/숫자/_/-)</small></label>
+          <input id="regUsername" type="text" placeholder="username" autocomplete="username" required
+                 pattern="[a-zA-Z0-9_\-]{2,32}" minlength="2" maxlength="32" />
+        </div>
+        <div class="field">
+          <label for="regEmail">이메일 <small style="color:#a0b0b8">(선택)</small></label>
+          <input id="regEmail" type="email" placeholder="you@example.com" autocomplete="email" />
+        </div>
+        <p class="auth-msg" id="registerMsg"></p>
+        <button class="auth-btn" type="submit" id="registerBtn">
+          <span class="passkey-icon">✨</span> 패스키로 가입
+        </button>
+      </form>
+    </div>
+    <script src="/static/auth.js"></script>
+  </body>
+</html>
