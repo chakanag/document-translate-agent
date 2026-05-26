@@ -1,0 +1,42 @@
+{
+  "_comment": "이 파일을 providers.local.json 으로 복사한 뒤 API key를 입력하세요.",
+
+  "deepl": {
+    "_comment": "DeepL Translation API — https://www.deepl.com/pro-api (무료 500K자/월). 번역 전용 API라 LLM보다 빠르고 저렴합니다.",
+    "_comment2": "무료 계정은 base_url을 https://api-free.deepl.com, 유료는 https://api.deepl.com 으로 설정하세요.",
+    "api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx",
+    "base_url": "https://api-free.deepl.com"
+  },
+
+  "papago": {
+    "_comment": "Naver Cloud Platform NMT API — https://www.ncloud.com/product/aiService/nmt",
+    "_comment2": "한국어·일본어·영어 번역 품질이 우수합니다. 콘솔에서 Application 등록 후 Client ID/Secret 발급.",
+    "client_id": "YOUR_NCP_CLIENT_ID",
+    "client_secret": "YOUR_NCP_CLIENT_SECRET"
+  },
+
+  "anthropic": {
+    "_comment": "Claude API — https://console.anthropic.com 에서 발급",
+    "api_key": "sk-ant-...",
+    "model": "claude-haiku-4-5-20251001"
+  },
+
+  "openai": {
+    "_comment": "OpenAI API — https://platform.openai.com 에서 발급",
+    "api_key": "sk-...",
+    "model": "gpt-4o-mini"
+  },
+
+  "gemini": {
+    "_comment": "Google AI Studio — https://aistudio.google.com 에서 발급",
+    "api_key": "AIza...",
+    "model": "gemini-1.5-flash"
+  },
+
+  "ollama": {
+    "_comment": "로컬 Ollama 서버. ollama list 로 설치된 모델명을 확인하세요.",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "",
+    "generate_timeout_seconds": 300
+  }
+}

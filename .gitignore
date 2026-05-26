@@ -42,3 +42,4 @@ deploy/.env
 *.log
 .server.log
 .server.pid
+config/providers.local.json

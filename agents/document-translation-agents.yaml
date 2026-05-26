@@ -1,0 +1,212 @@
+version: 1
+name: document-translation-agent-system
+description: >
+  Multi-agent workflow for uploading documents, detecting source language,
+  translating into a selected target language, previewing results, exporting
+  translated files, and managing translation history.
+
+global_policies:
+  preserve_document_structure: true
+  preserve_pdf_visual_layout: true
+  translate_text_only_without_changing_images_charts_tables: true
+  keep_user_files_private: true
+  require_preview_before_final_download: true
+  track_every_translation_job: true
+  supported_input_types:
+    - pdf
+    - doc
+    - docx
+    - txt
+    - md
+    - xls
+    - xlsx
+  supported_output_types:
+    - pdf
+    - doc
+    - docx
+    - txt
+    - md
+    - xls
+    - xlsx
+  default_target_language: ko
+
+agents:
+  - id: intake_agent
+    name: Document Intake Agent
+    purpose: Validate uploaded files, detect file type, collect user options, and create a translation job.
+    responsibilities:
+      - Validate extension, MIME type, and file size.
+      - Store original file metadata.
+      - Capture target language and requested output format.
+      - Create an initial history record.
+    inputs:
+      - uploaded_file
+      - target_language
+      - output_format
+    outputs:
+      - translation_job
+      - stored_original_file
+
+  - id: extraction_agent
+    name: Document Extraction Agent
+    purpose: Extract text and structural blocks from supported document formats.
+    responsibilities:
+      - Extract paragraphs, headings, tables, and sheets where possible.
+      - For PDFs, extract text spans with page number, bounding boxes, font size, and reading order.
+      - Preserve layout hints for preview/export.
+      - Mark unsupported or image-only regions for OCR fallback.
+    tools:
+      pdf: pymupdf_or_pdfplumber
+      pdf_layout: pymupdf_text_spans_and_bounding_boxes
+      docx: python_docx
+      text: native_text_reader
+      markdown: markdown_parser
+      spreadsheet: openpyxl
+      ocr_optional: tesseract_or_cloud_ocr
+    outputs:
+      - source_language_candidates
+      - document_blocks
+      - extraction_warnings
+
+  - id: language_agent
+    name: Language Detection Agent
+    purpose: Detect the source language of the uploaded document.
+    responsibilities:
+      - Detect primary source language from representative text.
+      - Handle mixed-language documents by block when needed.
+      - Skip translation for blocks already in target language unless requested.
+    outputs:
+      - source_language
+      - per_block_language_map
+
+  - id: translation_agent
+    name: Translation Orchestrator Agent
+    purpose: Translate extracted document blocks into the selected target language.
+    responsibilities:
+      - Chunk long documents safely.
+      - Preserve terms, numbers, tables, markdown syntax, and placeholders.
+      - Apply glossary and style guide when configured.
+      - Retry failed chunks and record partial failures.
+    prompt_contract:
+      system: >
+        You are a professional document translation agent. Preserve meaning,
+        formatting markers, table structure, numbers, proper nouns, and domain terms.
+      output_schema:
+        block_id: string
+        translated_text: string
+        warnings: array
+    outputs:
+      - translated_blocks
+      - translation_quality_notes
+
+  - id: preview_agent
+    name: Preview Agent
+    purpose: Build a user-facing preview of the original and translated content.
+    responsibilities:
+      - Render side-by-side original and translated text.
+      - Show document metadata, language, progress, and warnings.
+      - Support page/sheet/block navigation.
+      - Allow user confirmation before export.
+    outputs:
+      - preview_model
+
+  - id: export_agent
+    name: Export Agent
+    purpose: Generate downloadable translated documents in the requested format.
+    responsibilities:
+      - Rebuild translated document from translated blocks.
+      - For PDF output, preserve original page canvas, images, charts, vector drawings, and table geometry.
+      - For PDF output, replace only source-language text regions with translated text overlays.
+      - Preserve document structure as much as practical.
+      - Generate output file and checksum.
+      - Attach exported file metadata to history.
+    outputs:
+      - exported_file
+      - download_url
+
+  - id: history_agent
+    name: History Agent
+    purpose: Persist and retrieve translation history.
+    responsibilities:
+      - Store job status, timestamps, source/target language, file metadata, and download links.
+      - Support list, detail, retry, delete, and re-download.
+      - Track error states and user-visible messages.
+    outputs:
+      - history_record
+
+  - id: qa_agent
+    name: QA and Evaluation Agent
+    purpose: Verify translation job correctness before completion.
+    responsibilities:
+      - Check block count consistency.
+      - Check untranslated large segments.
+      - Check PDF visual layout preservation by comparing page count, media boxes, image count, and non-text drawing objects.
+      - Check table and markdown integrity.
+      - Validate exported file can be opened/read.
+    outputs:
+      - qa_report
+      - release_decision
+
+workflow:
+  - step: upload
+    agent: intake_agent
+    status_after_success: queued
+  - step: extract
+    agent: extraction_agent
+    status_after_success: extracted
+  - step: detect_language
+    agent: language_agent
+    status_after_success: language_detected
+  - step: translate
+    agent: translation_agent
+    status_after_success: translated
+  - step: preview
+    agent: preview_agent
+    status_after_success: preview_ready
+  - step: qa
+    agent: qa_agent
+    status_after_success: verified
+  - step: export
+    agent: export_agent
+    status_after_success: completed
+  - step: history_update
+    agent: history_agent
+    status_after_success: completed
+
+job_statuses:
+  - queued
+  - extracting
+  - extracted
+  - detecting_language
+  - language_detected
+  - translating
+  - translated
+  - preview_ready
+  - verified
+  - exporting
+  - completed
+  - failed
+  - cancelled
+
+minimum_api_surface:
+  - method: POST
+    path: /api/documents
+    purpose: Upload document and create translation job.
+  - method: GET
+    path: /api/jobs/{job_id}
+    purpose: Read job status and metadata.
+  - method: GET
+    path: /api/jobs/{job_id}/preview
+    purpose: Read source/translated preview model.
+  - method: POST
+    path: /api/jobs/{job_id}/export
+    purpose: Generate requested output file.
+  - method: GET
+    path: /api/jobs/{job_id}/download
+    purpose: Download exported file.
+  - method: GET
+    path: /api/history
+    purpose: List translation history.
+  - method: DELETE
+    path: /api/history/{job_id}
+    purpose: Delete a history item and associated files.
