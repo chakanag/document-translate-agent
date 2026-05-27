@@ -80,6 +80,9 @@ cmd_deploy() {
   DOCKER_BUILDKIT=0 $COMPOSE build app
   info "컨테이너 재시작 중..."
   $COMPOSE up -d --remove-orphans
+  # nginx 설정 변경 반영: 항상 재로드
+  info "nginx 설정 재로드 중..."
+  $COMPOSE exec -T nginx nginx -s reload 2>/dev/null || $COMPOSE restart nginx
   info "헬스체크 대기 중..."
   local ok_flag=0
   for i in $(seq 1 10); do
