@@ -22,6 +22,9 @@ _OCR_MIN_CONF = 30
 _OCR_LANG = "jpn+eng+chi_sim+chi_tra+kor"
 # Claude Vision OCR 모델 (translation.py와 동일한 haiku 모델 사용)
 _VISION_MODEL = "claude-haiku-4-5-20251001"
+# Claude document API 1회 호출당 처리할 최대 페이지 수.
+# 고밀도 일본어 기준 페이지당 ~2,000 토큰 → 2페이지 = ~4,000 토큰 (max_tokens 8192 이내)
+_PDF_BATCH_PAGES = 2
 
 
 def extract_blocks(path: Path, file_type: str, ocr_engine: str = "none") -> List[DocumentBlock]:
@@ -81,7 +84,7 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
     if ocr_engine == "claude_vision":
         try:
             doc_page_texts = _fetch_pdf_claude_doc(path, page_count)
-            logger.info("[PDF Doc API] %d 페이지 텍스트 사전 추출 완료", len(doc_page_texts))
+            logger.warning("[PDF Doc API] %d/%d 페이지 사전 추출 완료", len(doc_page_texts), page_count)
         except Exception as exc:
             logger.warning(
                 "[PDF Doc API] 사전 추출 실패, 페이지별 Vision API로 폴백: %s", exc
@@ -124,7 +127,7 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
         is_scanned = page_char_count < _OCR_CHAR_THRESHOLD
 
         if is_scanned and ocr_engine in {"tesseract", "claude_vision"}:
-            logger.info(
+            logger.warning(
                 "[OCR] 페이지 %d 스캔 감지 (chars=%d) → %s",
                 page_index + 1, page_char_count, ocr_engine,
             )
@@ -133,11 +136,13 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
                     ocr_blocks = _extract_page_ocr(page, page_index, order)
                 elif doc_page_texts.get(page_index + 1):
                     # 전체 PDF 사전 추출 텍스트를 Tesseract bbox에 매핑
+                    logger.warning("[OCR] 페이지 %d: document API 텍스트 사용", page_index + 1)
                     ocr_blocks = _map_claude_text_to_bboxes(
                         page, page_index, order, doc_page_texts[page_index + 1]
                     )
                 else:
                     # 사전 추출 실패 → 페이지별 Vision API 폴백
+                    logger.warning("[OCR] 페이지 %d: 사전 추출 없음, Vision API 폴백", page_index + 1)
                     ocr_blocks = _extract_page_claude_vision(page, page_index, order)
 
                 if ocr_blocks:
@@ -157,15 +162,17 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
 
 
 def _fetch_pdf_claude_doc(path: Path, page_count: int) -> dict:
-    """PDF 전체를 Claude document API로 전송 → 페이지별 추출 텍스트 반환.
+    """PDF를 _PDF_BATCH_PAGES 페이지씩 나눠 Claude document API로 추출.
 
-    Claude Chat과 동일한 방식: "type": "document", "media_type": "application/pdf"
-    페이지 구분자 '=== PAGE N ===' 를 기준으로 파싱.
+    전체를 한 번에 보내면 max_tokens(8192) 한계로 중간에 잘림.
+    배치 분할로 안정적으로 전체 페이지를 추출.
 
     Returns: {page_num(1-based): text_str}
     """
     import json
     import urllib.request
+
+    import fitz  # type: ignore
 
     from app.provider_settings import provider_model as _pm, provider_secret
 
@@ -174,78 +181,115 @@ def _fetch_pdf_claude_doc(path: Path, page_count: int) -> dict:
         raise RuntimeError("Anthropic API 키 미설정 (config/providers.local.json)")
     vision_model = _pm("anthropic", "model", "ANTHROPIC_TRANSLATION_MODEL", _VISION_MODEL)
 
-    pdf_b64 = base64.standard_b64encode(path.read_bytes()).decode()
+    all_page_texts: dict = {}
+    src_doc = fitz.open(path)
 
-    prompt = (
-        f"This PDF has {page_count} page(s). "
-        "Extract all text from every page. "
-        "For each page output exactly '=== PAGE N ===' (where N is the page number) "
-        "on its own line, then the full text of that page. "
-        "Rules:\n"
-        "- Output ONLY the raw text and page markers, no explanations or comments\n"
-        "- Preserve the original language exactly (Japanese, Chinese, Korean, etc.)\n"
-        "- Preserve all numbers, punctuation, and special characters\n"
-        "- For vertical Japanese/Chinese text read each column left-to-right, top-to-bottom\n"
-        "- Separate distinct text blocks within a page with a blank line\n"
-        "- Do NOT translate, summarize, or add markdown formatting\n"
-        "- If a page is blank or contains no text, write '=== PAGE N ===' then '(blank)'"
-    )
+    try:
+        for batch_start in range(0, page_count, _PDF_BATCH_PAGES):
+            batch_end = min(batch_start + _PDF_BATCH_PAGES, page_count)
+            batch_size = batch_end - batch_start
 
-    payload = json.dumps({
-        "model": vision_model,
-        "max_tokens": 8192,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": pdf_b64,
-                    },
+            # 배치 페이지들을 별도 PDF 바이트로 추출
+            sub_doc = fitz.open()
+            sub_doc.insert_pdf(src_doc, from_page=batch_start, to_page=batch_end - 1)
+            pdf_bytes = sub_doc.tobytes()
+            sub_doc.close()
+
+            pdf_b64 = base64.standard_b64encode(pdf_bytes).decode()
+
+            prompt = (
+                f"This PDF has {batch_size} page(s). "
+                "Extract all text from every page. "
+                "For each page output exactly '=== PAGE N ===' "
+                "(where N is the page number starting from 1) "
+                "on its own line, then the full text of that page. "
+                "Rules:\n"
+                "- Output ONLY the raw text and page markers, no explanations\n"
+                "- Preserve the original language exactly (Japanese, Chinese, Korean, etc.)\n"
+                "- Preserve all numbers, punctuation, and special characters\n"
+                "- For vertical Japanese/Chinese text: read each column left-to-right, top-to-bottom\n"
+                "- Separate distinct text blocks within a page with a blank line\n"
+                "- Do NOT translate, summarize, or add markdown formatting\n"
+                "- If a page is blank, write '=== PAGE N ===' then '(blank)'"
+            )
+
+            payload = json.dumps({
+                "model": vision_model,
+                "max_tokens": 8192,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_b64,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "pdfs-2024-09-25",
                 },
-                {"type": "text", "text": prompt},
-            ],
-        }],
-    }).encode("utf-8")
+            )
 
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "pdfs-2024-09-25",
-        },
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+            except Exception as exc:
+                logger.warning(
+                    "[PDF Doc API] 배치 p%d~p%d 실패: %s",
+                    batch_start + 1, batch_end, exc,
+                )
+                continue
+
+            raw_text = body["content"][0]["text"].strip()
+            stop_reason = body.get("stop_reason", "")
+            if stop_reason == "max_tokens":
+                logger.warning(
+                    "[PDF Doc API] 배치 p%d~p%d: max_tokens 도달 — 배치 크기를 줄이세요",
+                    batch_start + 1, batch_end,
+                )
+
+            logger.warning(
+                "[PDF Doc API] 배치 p%d~p%d 추출: %d chars (stop=%s)",
+                batch_start + 1, batch_end, len(raw_text), stop_reason,
+            )
+
+            # 로컬 페이지 번호(1-based) → 전역 페이지 번호로 변환 후 저장
+            marker_re = re.compile(r"===\s*PAGE\s+(\d+)\s*===", re.IGNORECASE)
+            parts = marker_re.split(raw_text)
+            i = 1
+            while i + 1 < len(parts):
+                try:
+                    local_page = int(parts[i])
+                except ValueError:
+                    i += 2
+                    continue
+                text = parts[i + 1].strip()
+                if text.lower() not in {"(blank)", ""}:
+                    global_page = batch_start + local_page
+                    all_page_texts[global_page] = text
+                i += 2
+
+    finally:
+        src_doc.close()
+
+    logger.warning(
+        "[PDF Doc API] 전체 완료: %d/%d 페이지 추출됨",
+        len(all_page_texts), page_count,
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-
-    raw_text = body["content"][0]["text"].strip()
-    logger.info("[PDF Doc API] 추출 완료: %d chars", len(raw_text))
-
-    # '=== PAGE N ===' 구분자로 페이지별 텍스트 파싱
-    marker_re = re.compile(r"===\s*PAGE\s+(\d+)\s*===", re.IGNORECASE)
-    parts = marker_re.split(raw_text)
-    # parts = [text_before_first_marker, page_num_1, text_1, page_num_2, text_2, ...]
-
-    page_texts: dict = {}
-    i = 1
-    while i + 1 < len(parts):
-        try:
-            page_num = int(parts[i])
-        except ValueError:
-            i += 2
-            continue
-        text = parts[i + 1].strip()
-        if text.lower() not in {"(blank)", ""}:
-            page_texts[page_num] = text
-        i += 2
-
-    logger.info("[PDF Doc API] 유효 텍스트 페이지: %s", sorted(page_texts.keys()))
-    return page_texts
+    return all_page_texts
 
 
 def _map_claude_text_to_bboxes(
