@@ -2,11 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 한글 폰트 + fontconfig + antiword(.doc 텍스트 추출) 설치
+# 한글 폰트 + fontconfig + antiword(.doc 텍스트 추출) + Tesseract OCR 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-nanum \
     fontconfig \
     antiword \
+    tesseract-ocr \
+    tesseract-ocr-jpn \
+    tesseract-ocr-eng \
  && fc-cache -fv \
  && rm -rf /var/lib/apt/lists/*
 

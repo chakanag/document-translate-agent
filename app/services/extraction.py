@@ -1,9 +1,22 @@
+import logging
 import re
 import subprocess
 from pathlib import Path
 from typing import List
 
 from app.models import DocumentBlock
+
+logger = logging.getLogger(__name__)
+
+# ── OCR 설정 ────────────────────────────────────────────────────────────
+# 페이지당 추출된 문자 수가 이 값 미만이면 스캔 페이지로 판단 → OCR 시도
+_OCR_CHAR_THRESHOLD = 20
+# OCR 렌더링 배율 (높을수록 정확도 ↑, 메모리 ↑)
+_OCR_ZOOM = 2.0
+# Tesseract 최소 신뢰도 (0~100). 이하 단어는 무시
+_OCR_MIN_CONF = 30
+# Tesseract 언어팩 (jpn=일본어, eng=영어)
+_OCR_LANG = "jpn+eng"
 
 
 def extract_blocks(path: Path, file_type: str) -> List[DocumentBlock]:
@@ -55,8 +68,12 @@ def extract_pdf_blocks(path: Path) -> List[DocumentBlock]:
     doc = fitz.open(path)
     blocks: List[DocumentBlock] = []
     order = 0
+
     for page_index, page in enumerate(doc):
         raw = page.get_text("dict")
+
+        # ── 일반 텍스트 추출 ────────────────────────────────────────────
+        page_text_blocks: List[DocumentBlock] = []
         for raw_block in raw.get("blocks", []):
             if raw_block.get("type") != 0:
                 continue
@@ -67,25 +84,163 @@ def extract_pdf_blocks(path: Path) -> List[DocumentBlock]:
                 text = "".join(span.get("text", "") for span in spans).strip()
                 first_span = spans[0]
                 x0, y0, x1, y1 = line.get("bbox", first_span.get("bbox"))
-                blocks.append(
+                page_text_blocks.append(
                     DocumentBlock(
-                        id=f"page-{page_index + 1}-span-{order + 1}",
+                        id=f"page-{page_index + 1}-span-{order + len(page_text_blocks) + 1}",
                         type="pdf_text_span",
                         sourceText=text,
                         translatedText=None,
                         pageNumber=page_index + 1,
                         bbox=(float(x0), float(y0), float(x1), float(y1)),
                         fontSize=float(first_span.get("size", 10)),
-                        order=order,
+                        order=order + len(page_text_blocks),
                         metadata={
                             "font": first_span.get("font"),
                             "color": first_span.get("color"),
                         },
                     )
                 )
-                order += 1
+
+        # ── 스캔 페이지 감지 → OCR fallback ─────────────────────────────
+        page_char_count = sum(len(b.sourceText) for b in page_text_blocks)
+        if page_char_count < _OCR_CHAR_THRESHOLD:
+            try:
+                ocr_blocks = _extract_page_ocr(page, page_index, order)
+                if ocr_blocks:
+                    logger.info(
+                        "[OCR] 페이지 %d: 텍스트 %d자 미만 → OCR %d 블록 추출",
+                        page_index + 1, _OCR_CHAR_THRESHOLD, len(ocr_blocks),
+                    )
+                    blocks.extend(ocr_blocks)
+                    order += len(ocr_blocks)
+                    continue  # 이 페이지는 OCR 블록으로 대체
+                else:
+                    logger.warning(
+                        "[OCR] 페이지 %d: OCR 결과 없음 (빈 페이지 또는 인식 실패)",
+                        page_index + 1,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[OCR] 페이지 %d 처리 실패, 기존 텍스트 블록 사용: %s",
+                    page_index + 1, exc,
+                )
+                # OCR 실패 시 일반 텍스트 블록으로 fallback
+
+        blocks.extend(page_text_blocks)
+        order += len(page_text_blocks)
+
     doc.close()
     return blocks
+
+
+def _extract_page_ocr(page, page_index: int, order_start: int) -> List[DocumentBlock]:
+    """이미지 기반(스캔) PDF 페이지를 Tesseract OCR로 텍스트 추출.
+
+    반환값: pdf_ocr_span 타입의 DocumentBlock 리스트.
+    각 블록은 라인 단위로 묶이며, PDF 포인트 좌표의 bbox를 포함합니다.
+    """
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "OCR 기능에는 pytesseract와 Pillow가 필요합니다.\n"
+            "  pip install pytesseract Pillow\n"
+            "  (시스템에 tesseract-ocr 바이너리도 필요합니다)"
+        ) from exc
+
+    import fitz  # type: ignore  # 이미 임포트되어 있지만 명시
+
+    # ── 페이지를 고해상도 이미지로 렌더링 ───────────────────────────────
+    mat = fitz.Matrix(_OCR_ZOOM, _OCR_ZOOM)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+    # ── Tesseract OCR (단어 + bounding box 포함 출력) ────────────────────
+    try:
+        ocr_data = pytesseract.image_to_data(
+            img,
+            output_type=pytesseract.Output.DICT,
+            lang=_OCR_LANG,
+            config="--psm 3",  # 자동 페이지 분할 (mixed layout 대응)
+        )
+    except pytesseract.TesseractNotFoundError as exc:
+        raise RuntimeError(
+            "tesseract 실행파일을 찾을 수 없습니다.\n"
+            "Dockerfile에 tesseract-ocr 패키지를 추가하세요:\n"
+            "  apt-get install tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng"
+        ) from exc
+
+    # ── 단어를 (block, par, line) 기준으로 묶어 라인 단위 블록 생성 ──────
+    # Tesseract Output.DICT 구조: 동일 key는 같은 라인
+    line_map: dict = {}
+    for i in range(len(ocr_data["text"])):
+        word = ocr_data["text"][i].strip()
+        conf = int(ocr_data["conf"][i])
+        # conf == -1 은 레이아웃 구분자, _OCR_MIN_CONF 미만은 노이즈
+        if conf < _OCR_MIN_CONF or not word:
+            continue
+
+        key = (
+            ocr_data["block_num"][i],
+            ocr_data["par_num"][i],
+            ocr_data["line_num"][i],
+        )
+        px_x  = ocr_data["left"][i]
+        px_y  = ocr_data["top"][i]
+        px_x2 = px_x + ocr_data["width"][i]
+        px_y2 = px_y + ocr_data["height"][i]
+
+        if key not in line_map:
+            line_map[key] = {
+                "words":  [],
+                "x":  px_x,   "y":  px_y,
+                "x2": px_x2,  "y2": px_y2,
+                "confs": [],
+            }
+        else:
+            line_map[key]["x2"] = max(line_map[key]["x2"], px_x2)
+            line_map[key]["y2"] = max(line_map[key]["y2"], px_y2)
+
+        line_map[key]["words"].append(word)
+        line_map[key]["confs"].append(conf)
+
+    # ── DocumentBlock 생성 ───────────────────────────────────────────────
+    result: List[DocumentBlock] = []
+    for idx, (_, ln) in enumerate(sorted(line_map.items())):
+        text = " ".join(ln["words"]).strip()
+        if not text:
+            continue
+
+        # 픽셀 좌표 → PDF 포인트 좌표 (zoom 역변환)
+        x0 = ln["x"]  / _OCR_ZOOM
+        y0 = ln["y"]  / _OCR_ZOOM
+        x1 = ln["x2"] / _OCR_ZOOM
+        y1 = ln["y2"] / _OCR_ZOOM
+
+        line_height = y1 - y0
+        font_size   = max(6.0, round(line_height * 0.75, 1))
+        avg_conf    = sum(ln["confs"]) / len(ln["confs"])
+
+        result.append(
+            DocumentBlock(
+                id=f"page-{page_index + 1}-ocr-{order_start + idx + 1}",
+                type="pdf_ocr_span",
+                sourceText=text,
+                translatedText=None,
+                pageNumber=page_index + 1,
+                bbox=(x0, y0, x1, y1),
+                fontSize=font_size,
+                order=order_start + idx,
+                metadata={
+                    "ocr_confidence": round(avg_conf, 1),
+                    "font": None,
+                    "color": 0,
+                },
+            )
+        )
+
+    return result
 
 
 def extract_docx_blocks(path: Path) -> List[DocumentBlock]:

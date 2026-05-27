@@ -59,10 +59,18 @@ def export_pdf_layout_preserving(job: TranslationJob, blocks: List[DocumentBlock
 
     out_path = EXPORTS_DIR / f"{job.id}.pdf"
     doc = fitz.open(job.originalPath)
-    pdf_blocks = [block for block in blocks if block.type == "pdf_text_span" and block.bbox]
 
-    # ── 원본 텍스트 지우기 ────────────────────────────────
+    # pdf_text_span: 벡터 텍스트 교체 / pdf_ocr_span: 이미지 위 오버레이
+    pdf_blocks = [
+        block for block in blocks
+        if block.type in ("pdf_text_span", "pdf_ocr_span") and block.bbox
+    ]
+
+    # ── ① 벡터 텍스트(pdf_text_span)만 Redact으로 제거 ──────────────────
+    # (pdf_ocr_span은 이미지 위에 있으므로 redact 불필요 — draw_rect로 처리)
     for block in pdf_blocks:
+        if block.type != "pdf_text_span":
+            continue
         page = doc[block.pageNumber - 1 if block.pageNumber else 0]
         rect = fitz.Rect(*block.bbox)
         page.add_redact_annot(rect, fill=(1, 1, 1))
@@ -70,11 +78,11 @@ def export_pdf_layout_preserving(job: TranslationJob, blocks: List[DocumentBlock
     for page in doc:
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
-    # ── 한글 폰트 준비 ────────────────────────────────────
+    # ── ② 한글 폰트 준비 ─────────────────────────────────────────────────
     cjk_font_path = _find_cjk_font()
     font_registered: set = set()   # 페이지별 폰트 등록 여부 추적
 
-    # ── 번역 텍스트 삽입 ──────────────────────────────────
+    # ── ③ 번역 텍스트 삽입 ───────────────────────────────────────────────
     for block in pdf_blocks:
         page_idx = block.pageNumber - 1 if block.pageNumber else 0
         page = doc[page_idx]
@@ -91,6 +99,10 @@ def export_pdf_layout_preserving(job: TranslationJob, blocks: List[DocumentBlock
         rect = fitz.Rect(*block.bbox)
         text = block.translatedText or ""
         font_size = max(5, min(block.fontSize or 9, 14))
+
+        # OCR 블록: 이미지 위에 흰 사각형을 덮어 원본 텍스트 이미지를 가림
+        if block.type == "pdf_ocr_span":
+            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
 
         inserted = page.insert_textbox(
             rect, text, fontsize=font_size, fontname=fontname,

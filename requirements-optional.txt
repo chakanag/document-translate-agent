@@ -1,6 +1,11 @@
 # Optional for layout-preserving PDF translation.
 PyMuPDF>=1.24.0
 
+# OCR support for image-based (scanned) PDFs.
+# Requires tesseract-ocr + tesseract-ocr-jpn + tesseract-ocr-eng system packages.
+pytesseract>=0.3.10
+Pillow>=10.0.0
+
 # Document format support.
 python-docx>=1.1.0
 openpyxl>=3.1.0
