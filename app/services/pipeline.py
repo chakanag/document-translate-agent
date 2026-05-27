@@ -23,6 +23,7 @@ def create_translation_job(
     output_format: str,
     ai_provider: str,
     user_id: str = None,
+    ocr_engine: str = "none",
 ) -> TranslationJob:
     file_type = extension_for(original_file_name)
     if file_type not in SUPPORTED_INPUT_TYPES:
@@ -50,6 +51,7 @@ def create_translation_job(
         updatedAt=now,
         originalPath=str(original_path),
         userId=user_id,
+        ocrEngine=ocr_engine,
     )
     return create_job(job)
 
@@ -57,7 +59,7 @@ def create_translation_job(
 def run_translation_pipeline(job: TranslationJob) -> TranslationJob:
     try:
         update_job(job.id, status="extracting")
-        blocks = extract_blocks(Path(job.originalPath), job.fileType)
+        blocks = extract_blocks(Path(job.originalPath), job.fileType, ocr_engine=job.ocrEngine)
         if not blocks:
             raise RuntimeError("No extractable text was found")
         save_blocks(job.id, blocks)

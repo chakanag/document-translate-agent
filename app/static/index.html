@@ -72,6 +72,19 @@
 
               <button id="uploadButton" type="submit">번역 시작</button>
             </div>
+
+            <!-- OCR 옵션: PDF 선택 시에만 표시 -->
+            <div id="ocrRow" class="ocr-row" hidden>
+              <label class="ocr-label">
+                <span>📷 스캔 PDF OCR</span>
+                <select id="ocrEngine" name="ocrEngine">
+                  <option value="none">사용 안 함 (텍스트 PDF)</option>
+                  <option value="tesseract">Tesseract OCR (무료 · 로컬)</option>
+                  <option value="claude_vision">Claude Vision OCR (AI · 유료)</option>
+                </select>
+              </label>
+              <span id="ocrCostHint" class="ocr-cost-hint" hidden></span>
+            </div>
           </form>
         </section>
 

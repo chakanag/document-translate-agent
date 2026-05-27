@@ -237,9 +237,15 @@ class App:
         target_language = str(form.get("targetLanguage") or DEFAULT_TARGET_LANGUAGE)
         output_format = str(form.get("outputFormat") or ext or "txt")
         ai_provider = str(form.get("aiProvider") or "demo")
+        ocr_engine = str(form.get("ocrEngine") or "none")
+        if ocr_engine not in {"none", "tesseract", "claude_vision"}:
+            ocr_engine = "none"
         user = scope.get("user")
         user_id = user.id if user else None
-        job = create_translation_job(file_item.filename, file_item.content, target_language, output_format, ai_provider, user_id)
+        job = create_translation_job(
+            file_item.filename, file_item.content, target_language,
+            output_format, ai_provider, user_id, ocr_engine=ocr_engine,
+        )
         thread = threading.Thread(target=run_translation_pipeline, args=(job,), daemon=True)
         thread.start()
         return json_response({"job": job.to_dict()}, 202)

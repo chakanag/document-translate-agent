@@ -1,6 +1,9 @@
+import base64
 import logging
+import os
 import re
 import subprocess
+from io import BytesIO
 from pathlib import Path
 from typing import List
 
@@ -15,15 +18,17 @@ _OCR_CHAR_THRESHOLD = 20
 _OCR_ZOOM = 2.0
 # Tesseract 최소 신뢰도 (0~100). 이하 단어는 무시
 _OCR_MIN_CONF = 30
-# Tesseract 언어팩 (jpn=일본어, eng=영어)
-_OCR_LANG = "jpn+eng"
+# Tesseract 언어팩: 일본어·영어·중국어(간체)·중국어(번체)·한국어
+_OCR_LANG = "jpn+eng+chi_sim+chi_tra+kor"
+# Claude Vision OCR 모델 (Haiku: 저비용, 고속)
+_VISION_MODEL = "claude-haiku-4-5"
 
 
-def extract_blocks(path: Path, file_type: str) -> List[DocumentBlock]:
+def extract_blocks(path: Path, file_type: str, ocr_engine: str = "none") -> List[DocumentBlock]:
     if file_type in {"txt", "md"}:
         return extract_text_blocks(path, file_type)
     if file_type == "pdf":
-        return extract_pdf_blocks(path)
+        return extract_pdf_blocks(path, ocr_engine=ocr_engine)
     if file_type == "docx":
         return extract_docx_blocks(path)
     if file_type == "doc":
@@ -101,30 +106,29 @@ def extract_pdf_blocks(path: Path) -> List[DocumentBlock]:
                     )
                 )
 
-        # ── 스캔 페이지 감지 → OCR fallback ─────────────────────────────
+        # ── 스캔 페이지 감지 → OCR 분기 ──────────────────────────────────
         page_char_count = sum(len(b.sourceText) for b in page_text_blocks)
-        if page_char_count < _OCR_CHAR_THRESHOLD:
+        is_scanned = page_char_count < _OCR_CHAR_THRESHOLD
+
+        if is_scanned and ocr_engine in {"tesseract", "claude_vision"}:
+            logger.info(
+                "[OCR] 페이지 %d 스캔 감지 (chars=%d) → %s",
+                page_index + 1, page_char_count, ocr_engine,
+            )
             try:
-                ocr_blocks = _extract_page_ocr(page, page_index, order)
+                if ocr_engine == "tesseract":
+                    ocr_blocks = _extract_page_ocr(page, page_index, order)
+                else:
+                    ocr_blocks = _extract_page_claude_vision(page, page_index, order)
+
                 if ocr_blocks:
-                    logger.info(
-                        "[OCR] 페이지 %d: 텍스트 %d자 미만 → OCR %d 블록 추출",
-                        page_index + 1, _OCR_CHAR_THRESHOLD, len(ocr_blocks),
-                    )
                     blocks.extend(ocr_blocks)
                     order += len(ocr_blocks)
-                    continue  # 이 페이지는 OCR 블록으로 대체
+                    continue
                 else:
-                    logger.warning(
-                        "[OCR] 페이지 %d: OCR 결과 없음 (빈 페이지 또는 인식 실패)",
-                        page_index + 1,
-                    )
+                    logger.warning("[OCR] 페이지 %d: OCR 결과 없음", page_index + 1)
             except Exception as exc:
-                logger.warning(
-                    "[OCR] 페이지 %d 처리 실패, 기존 텍스트 블록 사용: %s",
-                    page_index + 1, exc,
-                )
-                # OCR 실패 시 일반 텍스트 블록으로 fallback
+                logger.warning("[OCR] 페이지 %d 처리 실패: %s", page_index + 1, exc)
 
         blocks.extend(page_text_blocks)
         order += len(page_text_blocks)
@@ -240,6 +244,78 @@ def _extract_page_ocr(page, page_index: int, order_start: int) -> List[DocumentB
             )
         )
 
+    return result
+
+
+def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List[DocumentBlock]:
+    """Claude Vision API로 스캔 페이지 OCR (bbox 없음, 단락 단위 블록).
+
+    사용 모델: claude-haiku-4-5 (저비용)
+    비용 기준: ~$0.004/페이지 (1페이지 약 2000 input tokens + 500 output tokens)
+    """
+    import fitz  # type: ignore
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다")
+
+    try:
+        import anthropic  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("anthropic 패키지가 필요합니다: pip install anthropic") from exc
+
+    # 1.5× 해상도로 JPEG 렌더링 (파일 크기/토큰 절약)
+    mat = fitz.Matrix(1.5, 1.5)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img_b64 = base64.standard_b64encode(pix.tobytes("jpeg")).decode()
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model=_VISION_MODEL,
+            max_tokens=2048,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": img_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "이 이미지의 모든 텍스트를 OCR로 정확히 추출해주세요. "
+                            "원본 텍스트만 출력하고, 단락은 빈 줄로 구분하세요. "
+                            "설명·주석은 추가하지 마세요."
+                        ),
+                    },
+                ],
+            }],
+        )
+        ocr_text = response.content[0].text.strip()
+    except Exception as exc:
+        raise RuntimeError(f"Claude Vision API 호출 실패: {exc}") from exc
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", ocr_text) if p.strip()]
+    if not paragraphs and ocr_text:
+        paragraphs = [ocr_text]
+
+    result: List[DocumentBlock] = []
+    for idx, para in enumerate(paragraphs):
+        result.append(DocumentBlock(
+            id=f"page-{page_index + 1}-vision-{order_start + idx + 1}",
+            type="pdf_vision_span",
+            sourceText=para,
+            translatedText=None,
+            pageNumber=page_index + 1,
+            bbox=None,
+            order=order_start + idx,
+            metadata={"ocr_engine": "claude_vision", "ocr_confidence": 100},
+        ))
     return result
 
 

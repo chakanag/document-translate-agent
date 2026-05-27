@@ -153,6 +153,40 @@ label {
   font-size: 13px;
 }
 
+/* ── OCR 옵션 행 ─────────────────────────────────────────── */
+.ocr-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.ocr-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ocr-label span {
+  font-weight: 600;
+  color: var(--ink);
+}
+.ocr-label select {
+  min-width: 220px;
+}
+.ocr-cost-hint {
+  font-size: 12px;
+  color: var(--warn);
+  background: #fffbeb;
+  border: 1px solid #f5d76e;
+  border-radius: 6px;
+  padding: 4px 10px;
+  flex: 1;
+  min-width: 0;
+}
+
 .action-panel p {
   color: var(--muted);
   margin-top: 6px;
@@ -202,6 +236,7 @@ button:disabled,
 .icon-button {
   width: 40px;
   min-width: 40px;
+  min-height: 36px;
   padding: 0;
 }
 

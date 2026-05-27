@@ -103,7 +103,32 @@ function attachBlockClickHandlers() {
 }
 
 // ── 파일 선택 ─────────────────────────────────────────────────────────
-fileInput.addEventListener("change", () => {
+const ocrRow      = document.querySelector("#ocrRow");
+const ocrEngine   = document.querySelector("#ocrEngine");
+const ocrCostHint = document.querySelector("#ocrCostHint");
+
+// Claude Vision 비용 안내 (페이지 수 미리 읽기)
+async function _getPdfPageCount(file) {
+  // PDF 헤더에서 /Count 값으로 간이 추정
+  const buf = await file.slice(0, 1024 * 50).arrayBuffer();
+  const text = new TextDecoder("latin1").decode(buf);
+  const m = text.match(/\/Count\s+(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function _updateOcrCostHint(pageCount) {
+  if (!ocrCostHint) return;
+  if (ocrEngine.value === "claude_vision") {
+    const lo = pageCount ? (pageCount * 0.003).toFixed(3) : "?";
+    const hi = pageCount ? (pageCount * 0.006).toFixed(3) : "?";
+    ocrCostHint.textContent = `예상 비용: $${lo}~$${hi} (페이지당 약 $0.003~$0.006, Claude Haiku 기준)`;
+    ocrCostHint.hidden = false;
+  } else {
+    ocrCostHint.hidden = true;
+  }
+}
+
+fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   fileLabel.textContent = file ? file.name : "PDF, DOC, TXT, MD, XLS 문서를 선택하세요";
   if (file) {
@@ -115,7 +140,22 @@ fileInput.addEventListener("change", () => {
       xls: "xlsx", xlsx: "xlsx",
     };
     document.querySelector("#outputFormat").value = FORMAT_MAP[ext] || "txt";
+
+    // PDF일 때만 OCR 옵션 표시
+    if (ext === "pdf") {
+      ocrRow.hidden = false;
+      const pageCount = await _getPdfPageCount(file);
+      ocrEngine._pageCount = pageCount;
+      _updateOcrCostHint(pageCount);
+    } else {
+      ocrRow.hidden = true;
+      if (ocrEngine) ocrEngine.value = "none";
+    }
   }
+});
+
+ocrEngine && ocrEngine.addEventListener("change", () => {
+  _updateOcrCostHint(ocrEngine._pageCount || null);
 });
 
 // ── Provider 레이블 ───────────────────────────────────────────────────

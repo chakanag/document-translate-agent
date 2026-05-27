@@ -103,6 +103,8 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE translation_jobs ADD COLUMN ai_provider TEXT NOT NULL DEFAULT 'demo'")
     if "user_id" not in job_cols:
         con.execute("ALTER TABLE translation_jobs ADD COLUMN user_id TEXT")
+    if "ocr_engine" not in job_cols:
+        con.execute("ALTER TABLE translation_jobs ADD COLUMN ocr_engine TEXT NOT NULL DEFAULT 'none'")
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────
@@ -125,6 +127,7 @@ def row_to_job(row: sqlite3.Row) -> TranslationJob:
         exportedPath=row["exported_path"],
         warnings=json.loads(row["warnings_json"] or "[]"),
         userId=row["user_id"] if "user_id" in row.keys() else None,
+        ocrEngine=row["ocr_engine"] if "ocr_engine" in row.keys() else "none",
     )
 
 
@@ -135,9 +138,9 @@ def create_job(job: TranslationJob) -> TranslationJob:
             INSERT INTO translation_jobs (
                 id, original_file_name, file_type, source_language, target_language,
                 output_format, ai_provider, status, created_at, updated_at, completed_at,
-                error_message, original_path, exported_path, warnings_json, user_id
+                error_message, original_path, exported_path, warnings_json, user_id, ocr_engine
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
@@ -156,6 +159,7 @@ def create_job(job: TranslationJob) -> TranslationJob:
                 job.exportedPath,
                 json.dumps(job.warnings, ensure_ascii=False),
                 job.userId,
+                job.ocrEngine,
             ),
         )
     return job

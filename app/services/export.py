@@ -31,6 +31,10 @@ def export_job(job: TranslationJob, blocks: List[DocumentBlock]) -> Path:
     if job.outputFormat in {"txt", "md"}:
         return export_text(job, blocks, job.outputFormat)
     if job.outputFormat == "pdf":
+        # Vision OCR 블록(bbox 없음)은 별도 텍스트 PDF로 출력
+        has_vision = any(b.type == "pdf_vision_span" for b in blocks)
+        if has_vision:
+            return export_pdf_vision_ocr(job, blocks)
         return export_pdf_layout_preserving(job, blocks)
     if job.outputFormat in {"doc", "docx"}:
         return export_docx_preserving(job, blocks)
@@ -118,6 +122,90 @@ def export_pdf_layout_preserving(job: TranslationJob, blocks: List[DocumentBlock
 
     doc.save(out_path)
     doc.close()
+    return out_path
+
+
+def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> Path:
+    """Claude Vision OCR 블록(bbox 없음)을 번역된 텍스트 PDF로 내보내기.
+    원본 PDF 페이지를 배경으로 넣고, 하단에 반투명 번역 텍스트 오버레이를 추가."""
+    try:
+        import fitz  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("PyMuPDF가 필요합니다") from exc
+
+    out_path = EXPORTS_DIR / f"{job.id}.pdf"
+    cjk_font_path = _find_cjk_font()
+
+    # 원본 PDF가 있으면 배경으로 사용, 없으면 빈 A4 페이지
+    if job.originalPath and Path(job.originalPath).exists():
+        orig_doc = fitz.open(job.originalPath)
+    else:
+        orig_doc = None
+
+    out_doc = fitz.open()
+
+    # 페이지별로 블록 그룹화
+    from collections import defaultdict
+    page_blocks: dict = defaultdict(list)
+    for block in blocks:
+        if block.type == "pdf_vision_span":
+            page_blocks[block.pageNumber or 1].append(block)
+
+    page_nums = sorted(page_blocks.keys())
+    if not page_nums:
+        # 블록 없으면 빈 PDF
+        out_doc.new_page()
+        out_doc.save(out_path)
+        out_doc.close()
+        return out_path
+
+    for page_num in page_nums:
+        blks = page_blocks[page_num]
+
+        # 원본 페이지 크기 가져오기
+        if orig_doc and page_num - 1 < len(orig_doc):
+            orig_page = orig_doc[page_num - 1]
+            w, h = orig_page.rect.width, orig_page.rect.height
+        else:
+            w, h = 595, 842  # A4
+
+        new_page = out_doc.new_page(width=w, height=h)
+
+        # ── 원본 페이지를 배경 이미지로 복사 ──────────────────────────────
+        if orig_doc and page_num - 1 < len(orig_doc):
+            new_page.show_pdf_page(new_page.rect, orig_doc, page_num - 1)
+
+        # ── 번역 텍스트 오버레이 (반투명 흰 박스 + 텍스트) ──────────────
+        if cjk_font_path:
+            try:
+                new_page.insert_font(fontname="KR", fontfile=cjk_font_path)
+                fontname = "KR"
+            except Exception:
+                fontname = "helv"
+        else:
+            fontname = "helv"
+
+        # 오버레이 영역: 페이지 우측 절반 또는 전체 하단 (텍스트 양에 따라)
+        overlay_rect = fitz.Rect(w * 0.5, 20, w - 10, h - 20)
+        # 반투명 흰 배경
+        new_page.draw_rect(overlay_rect, color=(0.9, 0.9, 0.9), fill=(1, 1, 1), fill_opacity=0.85)
+
+        combined_text = "\n\n".join(b.translatedText or "" for b in blks if b.translatedText)
+        if combined_text:
+            new_page.insert_textbox(
+                overlay_rect.inflate(-8),
+                combined_text,
+                fontsize=9,
+                fontname=fontname,
+                color=(0, 0, 0),
+                align=fitz.TEXT_ALIGN_LEFT,
+            )
+
+    if orig_doc:
+        orig_doc.close()
+
+    out_doc.save(out_path)
+    out_doc.close()
     return out_path
 
 

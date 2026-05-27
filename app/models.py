@@ -57,6 +57,7 @@ class TranslationJob:
     exportedPath: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
     userId: Optional[str] = None
+    ocrEngine: str = "none"  # "none" | "tesseract" | "claude_vision"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
