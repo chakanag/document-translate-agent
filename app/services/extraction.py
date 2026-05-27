@@ -248,84 +248,186 @@ def _extract_page_ocr(page, page_index: int, order_start: int) -> List[DocumentB
 
 
 def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List[DocumentBlock]:
-    """Claude Vision API로 스캔 페이지 OCR (bbox 없음, 단락 단위 블록).
+    """Claude Vision OCR + Tesseract bbox 하이브리드.
 
-    사용 모델: claude-haiku-4-5 (저비용)
-    비용 기준: ~$0.004/페이지 (1페이지 약 2000 input tokens + 500 output tokens)
+    1. Tesseract로 단락 bbox 탐지 (위치 정보)
+    2. Claude Vision HTTP API로 전체 텍스트 추출 (텍스트 품질)
+    3. bbox ↔ 텍스트 매핑 → pdf_ocr_span 블록 반환 (원위치 교체 지원)
+
+    Tesseract 미설치 시: pdf_vision_span으로 폴백 (bbox 없음, 오버레이 출력)
+    Claude Vision API 실패 시: Tesseract 결과로 폴백
     """
+    import json
+    import urllib.request
+
     import fitz  # type: ignore
 
     from app.provider_settings import provider_model as _pm, provider_secret
+
     api_key = provider_secret("anthropic", "api_key", "ANTHROPIC_API_KEY")
     if not api_key:
-        raise RuntimeError("Anthropic API 키가 설정되지 않았습니다 (config/providers.local.json 또는 ANTHROPIC_API_KEY 환경변수)")
+        raise RuntimeError("Anthropic API 키 미설정 (config/providers.local.json)")
     vision_model = _pm("anthropic", "model", "ANTHROPIC_TRANSLATION_MODEL", _VISION_MODEL)
 
-    try:
-        import anthropic  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError("anthropic 패키지가 필요합니다: pip install anthropic") from exc
+    # ── Step 1: Tesseract로 단락 bbox 탐지 ──────────────────────────────
+    para_bboxes = _get_paragraph_bboxes(page)
 
-    # 2.0× 해상도 PNG 렌더링 (JPEG 압축 없이 선명하게)
+    # ── Step 2: Claude Vision HTTP API 호출 ─────────────────────────────
     mat = fitz.Matrix(2.0, 2.0)
     pix = page.get_pixmap(matrix=mat, alpha=False)
-    img_bytes = pix.tobytes("png")
-    img_b64 = base64.standard_b64encode(img_bytes).decode()
+    img_b64 = base64.standard_b64encode(pix.tobytes("png")).decode()
 
-    client = anthropic.Anthropic(api_key=api_key)
+    payload = json.dumps({
+        "model": vision_model,
+        "max_tokens": 4096,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": img_b64},
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Extract all text from this image exactly as it appears. "
+                        "Rules:\n"
+                        "- Output ONLY the raw text, no explanations or comments\n"
+                        "- Preserve original language (Japanese, Chinese, Korean, etc.)\n"
+                        "- Preserve numbers, punctuation, and symbols exactly\n"
+                        "- For vertical Japanese text, output each column left-to-right\n"
+                        "- Separate distinct text blocks with a blank line\n"
+                        "- Do NOT translate, summarize, or add markdown formatting"
+                    ),
+                },
+            ],
+        }],
+    }).encode("utf-8")
+
     try:
-        response = client.messages.create(
-            model=vision_model,
-            max_tokens=4096,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": img_b64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Extract all text from this image exactly as it appears. "
-                            "Rules:\n"
-                            "- Output ONLY the raw text, no explanations or comments\n"
-                            "- Preserve original language (Japanese, Chinese, Korean, etc.)\n"
-                            "- Preserve numbers, punctuation, and symbols exactly\n"
-                            "- For vertical Japanese text, output each column left-to-right\n"
-                            "- Separate distinct text blocks with a blank line\n"
-                            "- Do NOT translate, summarize, or add markdown formatting"
-                        ),
-                    },
-                ],
-            }],
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
         )
-        ocr_text = response.content[0].text.strip()
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        ocr_text = body["content"][0]["text"].strip()
+        logger.info("[Vision OCR] 페이지 %d 추출 완료: %d chars", page_index + 1, len(ocr_text))
     except Exception as exc:
         logger.error("[Vision OCR] 페이지 %d API 실패: %s", page_index + 1, exc)
+        # API 실패 → Tesseract 결과로 폴백
+        if para_bboxes:
+            return _extract_page_ocr(page, page_index, order_start)
         raise RuntimeError(f"Claude Vision API 호출 실패: {exc}") from exc
 
-    logger.info("[Vision OCR] 페이지 %d 추출 완료: %d chars", page_index + 1, len(ocr_text))
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", ocr_text) if p.strip()]
-    if not paragraphs and ocr_text:
-        paragraphs = [ocr_text]
+    # ── Step 3: Claude Vision 텍스트를 단락 단위로 분할 ─────────────────
+    cv_paras = [p.strip() for p in re.split(r"\n{2,}", ocr_text) if p.strip()]
+    if not cv_paras:
+        cv_paras = [ln.strip() for ln in ocr_text.splitlines() if ln.strip()]
+    if not cv_paras:
+        cv_paras = [ocr_text] if ocr_text else []
 
-    result: List[DocumentBlock] = []
-    for idx, para in enumerate(paragraphs):
-        result.append(DocumentBlock(
-            id=f"page-{page_index + 1}-vision-{order_start + idx + 1}",
-            type="pdf_vision_span",
-            sourceText=para,
+    # ── Tesseract bbox 없으면 pdf_vision_span으로 폴백 ───────────────────
+    if not para_bboxes:
+        result: List[DocumentBlock] = []
+        for idx, para in enumerate(cv_paras):
+            result.append(DocumentBlock(
+                id=f"page-{page_index + 1}-vision-{order_start + idx + 1}",
+                type="pdf_vision_span",
+                sourceText=para,
+                translatedText=None,
+                pageNumber=page_index + 1,
+                bbox=None,
+                order=order_start + idx,
+                metadata={"ocr_engine": "claude_vision", "ocr_confidence": 100},
+            ))
+        return result
+
+    # ── Step 4: Tesseract bbox ↔ Claude Vision 텍스트 비례 매핑 ─────────
+    # Tesseract 단락 수(n)에 맞게 Claude Vision 단락(m)을 균등 분배
+    n, m = len(para_bboxes), len(cv_paras)
+    out: List[DocumentBlock] = []
+    for i, (x0, y0, x1, y1, _) in enumerate(para_bboxes):
+        start = round(i * m / n)
+        end   = round((i + 1) * m / n)
+        text  = " ".join(cv_paras[start:end]).strip()
+        if not text:
+            continue
+        font_size = max(6.0, round((y1 - y0) * 0.75, 1))
+        out.append(DocumentBlock(
+            id=f"page-{page_index + 1}-vision-{order_start + i + 1}",
+            type="pdf_ocr_span",        # bbox 있음 → 원위치 교체
+            sourceText=text,
             translatedText=None,
             pageNumber=page_index + 1,
-            bbox=None,
-            order=order_start + idx,
+            bbox=(x0, y0, x1, y1),
+            fontSize=font_size,
+            order=order_start + i,
             metadata={"ocr_engine": "claude_vision", "ocr_confidence": 100},
         ))
+
+    return out if out else _extract_page_ocr(page, page_index, order_start)
+
+
+def _get_paragraph_bboxes(page) -> List[tuple]:
+    """Tesseract로 단락 레벨 bbox만 추출 (텍스트 위치 정보 전용).
+
+    반환: [(x0, y0, x1, y1, tess_text), ...] — PDF 포인트 좌표
+    pytesseract/Pillow 미설치 시 빈 리스트 반환.
+    """
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return []
+
+    import fitz  # type: ignore
+
+    mat = fitz.Matrix(_OCR_ZOOM, _OCR_ZOOM)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+    try:
+        ocr_data = pytesseract.image_to_data(
+            img,
+            output_type=pytesseract.Output.DICT,
+            lang=_OCR_LANG,
+            config="--psm 3",
+        )
+    except Exception as exc:
+        logger.warning("[Vision OCR] Tesseract bbox 추출 실패: %s", exc)
+        return []
+
+    para_map: dict = {}
+    for i in range(len(ocr_data["text"])):
+        word = ocr_data["text"][i].strip()
+        conf = int(ocr_data["conf"][i])
+        if conf < _OCR_MIN_CONF or not word:
+            continue
+
+        key = (ocr_data["block_num"][i], ocr_data["par_num"][i])
+        px, py = ocr_data["left"][i], ocr_data["top"][i]
+        px2 = px + ocr_data["width"][i]
+        py2 = py + ocr_data["height"][i]
+
+        if key not in para_map:
+            para_map[key] = {"x": px, "y": py, "x2": px2, "y2": py2, "words": [word]}
+        else:
+            p = para_map[key]
+            p["x"], p["y"]   = min(p["x"], px),   min(p["y"], py)
+            p["x2"], p["y2"] = max(p["x2"], px2), max(p["y2"], py2)
+            p["words"].append(word)
+
+    result = []
+    for _, p in sorted(para_map.items()):
+        x0, y0 = p["x"] / _OCR_ZOOM, p["y"] / _OCR_ZOOM
+        x1, y1 = p["x2"] / _OCR_ZOOM, p["y2"] / _OCR_ZOOM
+        result.append((x0, y0, x1, y1, " ".join(p["words"])))
     return result
 
 
