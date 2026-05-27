@@ -127,25 +127,36 @@ def export_pdf_layout_preserving(job: TranslationJob, blocks: List[DocumentBlock
 
 def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> Path:
     """Claude Vision OCR 블록(bbox 없음)을 번역된 텍스트 PDF로 내보내기.
-    원본 PDF 페이지를 배경으로 넣고, 하단에 반투명 번역 텍스트 오버레이를 추가."""
+
+    레이아웃:
+      ┌──────────────────────┐
+      │  원본 페이지 (래스터) │  ← get_pixmap()으로 렌더링 (폰트 문제 없음)
+      ├──────────────────────┤
+      │  번역 텍스트 (흰 배경)│  ← 전체 폭, 텍스트 양에 따라 높이 자동 조정
+      └──────────────────────┘
+    """
     try:
         import fitz  # type: ignore
     except ImportError as exc:
         raise RuntimeError("PyMuPDF가 필요합니다") from exc
 
+    from collections import defaultdict
+
+    _FONT_SIZE   = 10
+    _PADDING     = 14
+    _LINE_HEIGHT = _FONT_SIZE * 1.55   # points
+    _MIN_TRANS_H = 120                 # 번역 영역 최소 높이
+
     out_path = EXPORTS_DIR / f"{job.id}.pdf"
     cjk_font_path = _find_cjk_font()
 
-    # 원본 PDF가 있으면 배경으로 사용, 없으면 빈 A4 페이지
+    orig_doc = None
     if job.originalPath and Path(job.originalPath).exists():
         orig_doc = fitz.open(job.originalPath)
-    else:
-        orig_doc = None
 
     out_doc = fitz.open()
 
-    # 페이지별로 블록 그룹화
-    from collections import defaultdict
+    # ── 페이지별 블록 그룹화 ────────────────────────────────────────────
     page_blocks: dict = defaultdict(list)
     for block in blocks:
         if block.type == "pdf_vision_span":
@@ -153,58 +164,95 @@ def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> P
 
     page_nums = sorted(page_blocks.keys())
     if not page_nums:
-        # 블록 없으면 빈 PDF
         out_doc.new_page()
         out_doc.save(out_path)
         out_doc.close()
+        if orig_doc:
+            orig_doc.close()
         return out_path
 
     for page_num in page_nums:
         blks = page_blocks[page_num]
 
-        # 원본 페이지 크기 가져오기
+        # ── 원본 페이지 크기 ──────────────────────────────────────────────
         if orig_doc and page_num - 1 < len(orig_doc):
             orig_page = orig_doc[page_num - 1]
-            w, h = orig_page.rect.width, orig_page.rect.height
+            w = float(orig_page.rect.width)
+            h = float(orig_page.rect.height)
         else:
-            w, h = 595, 842  # A4
+            orig_page = None
+            w, h = 595.0, 842.0  # A4
 
-        new_page = out_doc.new_page(width=w, height=h)
-
-        # ── 원본 페이지를 배경 이미지로 복사 ──────────────────────────────
-        if orig_doc and page_num - 1 < len(orig_doc):
-            new_page.show_pdf_page(new_page.rect, orig_doc, page_num - 1)
-
-        # ── 번역 텍스트 오버레이 (반투명 흰 박스 + 텍스트) ──────────────
-        if cjk_font_path:
-            try:
-                new_page.insert_font(fontname="KR", fontfile=cjk_font_path)
-                fontname = "KR"
-            except Exception:
-                fontname = "helv"
-        else:
-            fontname = "helv"
-
-        # 오버레이 영역: 페이지 우측 절반 또는 전체 하단 (텍스트 양에 따라)
-        overlay_rect = fitz.Rect(w * 0.5, 20, w - 10, h - 20)
-        # 반투명 흰 배경
-        new_page.draw_rect(overlay_rect, color=(0.9, 0.9, 0.9), fill=(1, 1, 1), fill_opacity=0.85)
-
+        # ── 번역 텍스트 높이 추정 ─────────────────────────────────────────
         combined_text = "\n\n".join(b.translatedText or "" for b in blks if b.translatedText)
+        usable_w = w - 2 * _PADDING
+        # 글자 폭 추정: 한글/CJK ≈ font_size, 영문 ≈ font_size * 0.55
+        avg_char_w = _FONT_SIZE * 0.72
+        chars_per_line = max(1, int(usable_w / avg_char_w))
+        total_lines = sum(
+            max(1, (len(para) // chars_per_line) + 1)
+            for para in combined_text.split("\n\n")
+        ) if combined_text else 0
+        # 단락 간 여백 포함
+        para_count = len([p for p in combined_text.split("\n\n") if p.strip()])
+        trans_h = max(_MIN_TRANS_H, total_lines * _LINE_HEIGHT + para_count * 6 + 2 * _PADDING)
+
+        # ── 새 페이지: 원본 높이 + 번역 영역 ─────────────────────────────
+        new_h = h + trans_h
+        new_page = out_doc.new_page(width=w, height=new_h)
+
+        # ── 원본 페이지를 래스터 이미지로 삽입 (폰트 참조 없음) ──────────
+        if orig_page is not None:
+            try:
+                zoom = min(2.0, 300 / 72)   # 최대 2x, 약 150dpi
+                pix = orig_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+                new_page.insert_image(fitz.Rect(0, 0, w, h), pixmap=pix)
+            except Exception:
+                pass  # 이미지 삽입 실패 시 흰 배경 유지
+
+        # ── 번역 영역: 흰 배경 + 텍스트 ─────────────────────────────────
+        trans_rect = fitz.Rect(0, h, w, new_h)
+        new_page.draw_rect(trans_rect, color=(0.85, 0.85, 0.85), fill=(1, 1, 1))
+
+        # 구분선
+        new_page.draw_line(
+            fitz.Point(0, h), fitz.Point(w, h),
+            color=(0.5, 0.5, 0.5), width=0.5,
+        )
+
         if combined_text:
-            # overlay_rect.inflate(-8) — PyMuPDF 1.24+에서 제거됨 → 직접 계산
+            # 폰트 등록 (CJK 지원)
+            fontname = "helv"
+            if cjk_font_path:
+                try:
+                    new_page.insert_font(fontname="KR", fontfile=cjk_font_path)
+                    fontname = "KR"
+                except Exception:
+                    pass
+
             inner_rect = fitz.Rect(
-                overlay_rect.x0 + 8, overlay_rect.y0 + 8,
-                overlay_rect.x1 - 8, overlay_rect.y1 - 8,
+                _PADDING, h + _PADDING,
+                w - _PADDING, new_h - _PADDING,
             )
-            new_page.insert_textbox(
+            overflow = new_page.insert_textbox(
                 inner_rect,
                 combined_text,
-                fontsize=9,
+                fontsize=_FONT_SIZE,
                 fontname=fontname,
                 color=(0, 0, 0),
                 align=fitz.TEXT_ALIGN_LEFT,
             )
+            # 텍스트가 넘치면 폰트를 줄여 재시도
+            if overflow < 0:
+                reduced_size = max(7, _FONT_SIZE - 2)
+                new_page.insert_textbox(
+                    inner_rect,
+                    combined_text,
+                    fontsize=reduced_size,
+                    fontname=fontname,
+                    color=(0.1, 0.1, 0.1),
+                    align=fitz.TEXT_ALIGN_LEFT,
+                )
 
     if orig_doc:
         orig_doc.close()
