@@ -130,25 +130,39 @@ def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> P
 
     레이아웃:
       ┌──────────────────────┐
-      │  원본 페이지 (래스터) │  ← get_pixmap()으로 렌더링 (폰트 문제 없음)
+      │  원본 페이지 (래스터) │  ← 1x zoom (72dpi), 폰트 참조 없음
       ├──────────────────────┤
       │  번역 텍스트 (흰 배경)│  ← 전체 폭, 텍스트 양에 따라 높이 자동 조정
       └──────────────────────┘
+
+    파일 크기 최적화:
+      - zoom=1.0 (원본 해상도 유지, 불필요한 확대 없음)
+      - garbage=4 + deflate=True 로 저장 → 폰트 중복 제거 + 압축
     """
     try:
         import fitz  # type: ignore
     except ImportError as exc:
         raise RuntimeError("PyMuPDF가 필요합니다") from exc
 
+    import logging as _logging
     from collections import defaultdict
 
+    _log = _logging.getLogger(__name__)
     _FONT_SIZE   = 10
     _PADDING     = 14
-    _LINE_HEIGHT = _FONT_SIZE * 1.55   # points
-    _MIN_TRANS_H = 120                 # 번역 영역 최소 높이
+    _LINE_HEIGHT = _FONT_SIZE * 1.55
+    _MIN_TRANS_H = 100
 
     out_path = EXPORTS_DIR / f"{job.id}.pdf"
     cjk_font_path = _find_cjk_font()
+
+    # 폰트 데이터를 한 번만 읽어 모든 페이지에서 재사용 (중복 임베딩 방지)
+    cjk_font_data: Optional[bytes] = None
+    if cjk_font_path:
+        try:
+            cjk_font_data = Path(cjk_font_path).read_bytes()
+        except Exception:
+            cjk_font_data = None
 
     orig_doc = None
     if job.originalPath and Path(job.originalPath).exists():
@@ -165,7 +179,7 @@ def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> P
     page_nums = sorted(page_blocks.keys())
     if not page_nums:
         out_doc.new_page()
-        out_doc.save(out_path)
+        out_doc.save(out_path, garbage=4, deflate=True)
         out_doc.close()
         if orig_doc:
             orig_doc.close()
@@ -181,83 +195,89 @@ def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> P
             h = float(orig_page.rect.height)
         else:
             orig_page = None
-            w, h = 595.0, 842.0  # A4
+            w, h = 595.0, 842.0
 
-        # ── 번역 텍스트 높이 추정 ─────────────────────────────────────────
-        combined_text = "\n\n".join(b.translatedText or "" for b in blks if b.translatedText)
-        usable_w = w - 2 * _PADDING
-        # 글자 폭 추정: 한글/CJK ≈ font_size, 영문 ≈ font_size * 0.55
-        avg_char_w = _FONT_SIZE * 0.72
-        chars_per_line = max(1, int(usable_w / avg_char_w))
-        total_lines = sum(
-            max(1, (len(para) // chars_per_line) + 1)
-            for para in combined_text.split("\n\n")
-        ) if combined_text else 0
-        # 단락 간 여백 포함
-        para_count = len([p for p in combined_text.split("\n\n") if p.strip()])
-        trans_h = max(_MIN_TRANS_H, total_lines * _LINE_HEIGHT + para_count * 6 + 2 * _PADDING)
-
-        # ── 새 페이지: 원본 높이 + 번역 영역 ─────────────────────────────
-        new_h = h + trans_h
-        new_page = out_doc.new_page(width=w, height=new_h)
-
-        # ── 원본 페이지를 래스터 이미지로 삽입 (폰트 참조 없음) ──────────
-        if orig_page is not None:
-            try:
-                zoom = min(2.0, 300 / 72)   # 최대 2x, 약 150dpi
-                pix = orig_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-                new_page.insert_image(fitz.Rect(0, 0, w, h), pixmap=pix)
-            except Exception:
-                pass  # 이미지 삽입 실패 시 흰 배경 유지
-
-        # ── 번역 영역: 흰 배경 + 텍스트 ─────────────────────────────────
-        trans_rect = fitz.Rect(0, h, w, new_h)
-        new_page.draw_rect(trans_rect, color=(0.85, 0.85, 0.85), fill=(1, 1, 1))
-
-        # 구분선
-        new_page.draw_line(
-            fitz.Point(0, h), fitz.Point(w, h),
-            color=(0.5, 0.5, 0.5), width=0.5,
+        # ── 번역 텍스트 수집 ─────────────────────────────────────────────
+        combined_text = "\n\n".join(
+            b.translatedText for b in blks if b.translatedText and b.translatedText.strip()
         )
 
-        if combined_text:
-            # 폰트 등록 (CJK 지원)
-            fontname = "helv"
-            if cjk_font_path:
+        # ── 번역 영역 높이 추정 ───────────────────────────────────────────
+        usable_w     = w - 2 * _PADDING
+        avg_char_w   = _FONT_SIZE * 0.72   # 한글 글자폭 근사
+        chars_per_ln = max(1, int(usable_w / avg_char_w))
+        para_list    = [p for p in combined_text.split("\n\n") if p.strip()] if combined_text else []
+        total_lines  = sum(max(1, (len(p) // chars_per_ln) + 1) for p in para_list)
+        trans_h      = max(_MIN_TRANS_H,
+                           total_lines * _LINE_HEIGHT + len(para_list) * 6 + 2 * _PADDING)
+
+        new_h    = h + trans_h
+        new_page = out_doc.new_page(width=w, height=new_h)
+
+        # ── 원본 페이지 → 래스터 이미지 삽입 (zoom=1.0, 폰트 참조 없음) ──
+        if orig_page is not None:
+            try:
+                pix = orig_page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+                new_page.insert_image(fitz.Rect(0, 0, w, h), pixmap=pix)
+            except Exception as exc:
+                _log.warning("[export] p%d 원본 이미지 삽입 실패: %s", page_num, exc)
+
+        # ── 번역 영역 배경 + 구분선 ──────────────────────────────────────
+        new_page.draw_rect(
+            fitz.Rect(0, h, w, new_h),
+            color=(0.8, 0.8, 0.8), fill=(1, 1, 1),
+        )
+        new_page.draw_line(
+            fitz.Point(0, h), fitz.Point(w, h),
+            color=(0.4, 0.4, 0.4), width=0.8,
+        )
+
+        if not combined_text:
+            _log.warning("[export] p%d 번역 텍스트 없음 (translatedText=None)", page_num)
+            continue
+
+        # ── 폰트 등록 (페이지마다 등록, garbage=4 저장 시 자동 중복 제거) ─
+        fontname = "helv"
+        if cjk_font_data:
+            try:
+                new_page.insert_font(fontname="KR", fontbuffer=cjk_font_data)
+                fontname = "KR"
+            except Exception as exc:
+                _log.warning("[export] p%d KR 폰트 등록 실패: %s", page_num, exc)
+
+        # ── 텍스트 삽입 ──────────────────────────────────────────────────
+        inner_rect = fitz.Rect(_PADDING, h + _PADDING, w - _PADDING, new_h - _PADDING)
+        try:
+            overflow = new_page.insert_textbox(
+                inner_rect, combined_text,
+                fontsize=_FONT_SIZE, fontname=fontname,
+                color=(0, 0, 0), align=fitz.TEXT_ALIGN_LEFT,
+            )
+            # 넘치면 더 작은 폰트로 재시도
+            if overflow < 0 and _FONT_SIZE > 7:
+                new_page.insert_textbox(
+                    inner_rect, combined_text,
+                    fontsize=max(7, _FONT_SIZE - 2), fontname=fontname,
+                    color=(0, 0, 0), align=fitz.TEXT_ALIGN_LEFT,
+                )
+        except Exception as exc:
+            _log.warning("[export] p%d 텍스트 삽입 실패(%s): %s", page_num, fontname, exc)
+            # CJK 폰트 실패 시 helv 로 재시도 (글자 깨질 수 있지만 페이지 유지)
+            if fontname != "helv":
                 try:
-                    new_page.insert_font(fontname="KR", fontfile=cjk_font_path)
-                    fontname = "KR"
+                    new_page.insert_textbox(
+                        inner_rect, combined_text,
+                        fontsize=_FONT_SIZE, fontname="helv",
+                        color=(0, 0, 0), align=fitz.TEXT_ALIGN_LEFT,
+                    )
                 except Exception:
                     pass
-
-            inner_rect = fitz.Rect(
-                _PADDING, h + _PADDING,
-                w - _PADDING, new_h - _PADDING,
-            )
-            overflow = new_page.insert_textbox(
-                inner_rect,
-                combined_text,
-                fontsize=_FONT_SIZE,
-                fontname=fontname,
-                color=(0, 0, 0),
-                align=fitz.TEXT_ALIGN_LEFT,
-            )
-            # 텍스트가 넘치면 폰트를 줄여 재시도
-            if overflow < 0:
-                reduced_size = max(7, _FONT_SIZE - 2)
-                new_page.insert_textbox(
-                    inner_rect,
-                    combined_text,
-                    fontsize=reduced_size,
-                    fontname=fontname,
-                    color=(0.1, 0.1, 0.1),
-                    align=fitz.TEXT_ALIGN_LEFT,
-                )
 
     if orig_doc:
         orig_doc.close()
 
-    out_doc.save(out_path)
+    # garbage=4: 중복 폰트·이미지 제거 / deflate: 스트림 압축
+    out_doc.save(out_path, garbage=4, deflate=True)
     out_doc.close()
     return out_path
 
