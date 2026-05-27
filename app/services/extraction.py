@@ -71,8 +71,21 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
         ) from exc
 
     doc = fitz.open(path)
+    page_count = len(doc)
     blocks: List[DocumentBlock] = []
     order = 0
+
+    # ── Claude document API 사전 추출 (claude_vision 모드) ─────────────────
+    # Claude Chat과 동일하게 PDF 전체를 document API로 전송 → 고품질 OCR
+    doc_page_texts: dict = {}
+    if ocr_engine == "claude_vision":
+        try:
+            doc_page_texts = _fetch_pdf_claude_doc(path, page_count)
+            logger.info("[PDF Doc API] %d 페이지 텍스트 사전 추출 완료", len(doc_page_texts))
+        except Exception as exc:
+            logger.warning(
+                "[PDF Doc API] 사전 추출 실패, 페이지별 Vision API로 폴백: %s", exc
+            )
 
     for page_index, page in enumerate(doc):
         raw = page.get_text("dict")
@@ -118,7 +131,13 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
             try:
                 if ocr_engine == "tesseract":
                     ocr_blocks = _extract_page_ocr(page, page_index, order)
+                elif doc_page_texts.get(page_index + 1):
+                    # 전체 PDF 사전 추출 텍스트를 Tesseract bbox에 매핑
+                    ocr_blocks = _map_claude_text_to_bboxes(
+                        page, page_index, order, doc_page_texts[page_index + 1]
+                    )
                 else:
+                    # 사전 추출 실패 → 페이지별 Vision API 폴백
                     ocr_blocks = _extract_page_claude_vision(page, page_index, order)
 
                 if ocr_blocks:
@@ -135,6 +154,157 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
 
     doc.close()
     return blocks
+
+
+def _fetch_pdf_claude_doc(path: Path, page_count: int) -> dict:
+    """PDF 전체를 Claude document API로 전송 → 페이지별 추출 텍스트 반환.
+
+    Claude Chat과 동일한 방식: "type": "document", "media_type": "application/pdf"
+    페이지 구분자 '=== PAGE N ===' 를 기준으로 파싱.
+
+    Returns: {page_num(1-based): text_str}
+    """
+    import json
+    import urllib.request
+
+    from app.provider_settings import provider_model as _pm, provider_secret
+
+    api_key = provider_secret("anthropic", "api_key", "ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("Anthropic API 키 미설정 (config/providers.local.json)")
+    vision_model = _pm("anthropic", "model", "ANTHROPIC_TRANSLATION_MODEL", _VISION_MODEL)
+
+    pdf_b64 = base64.standard_b64encode(path.read_bytes()).decode()
+
+    prompt = (
+        f"This PDF has {page_count} page(s). "
+        "Extract all text from every page. "
+        "For each page output exactly '=== PAGE N ===' (where N is the page number) "
+        "on its own line, then the full text of that page. "
+        "Rules:\n"
+        "- Output ONLY the raw text and page markers, no explanations or comments\n"
+        "- Preserve the original language exactly (Japanese, Chinese, Korean, etc.)\n"
+        "- Preserve all numbers, punctuation, and special characters\n"
+        "- For vertical Japanese/Chinese text read each column left-to-right, top-to-bottom\n"
+        "- Separate distinct text blocks within a page with a blank line\n"
+        "- Do NOT translate, summarize, or add markdown formatting\n"
+        "- If a page is blank or contains no text, write '=== PAGE N ===' then '(blank)'"
+    )
+
+    payload = json.dumps({
+        "model": vision_model,
+        "max_tokens": 8192,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_b64,
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "pdfs-2024-09-25",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+
+    raw_text = body["content"][0]["text"].strip()
+    logger.info("[PDF Doc API] 추출 완료: %d chars", len(raw_text))
+
+    # '=== PAGE N ===' 구분자로 페이지별 텍스트 파싱
+    marker_re = re.compile(r"===\s*PAGE\s+(\d+)\s*===", re.IGNORECASE)
+    parts = marker_re.split(raw_text)
+    # parts = [text_before_first_marker, page_num_1, text_1, page_num_2, text_2, ...]
+
+    page_texts: dict = {}
+    i = 1
+    while i + 1 < len(parts):
+        try:
+            page_num = int(parts[i])
+        except ValueError:
+            i += 2
+            continue
+        text = parts[i + 1].strip()
+        if text.lower() not in {"(blank)", ""}:
+            page_texts[page_num] = text
+        i += 2
+
+    logger.info("[PDF Doc API] 유효 텍스트 페이지: %s", sorted(page_texts.keys()))
+    return page_texts
+
+
+def _map_claude_text_to_bboxes(
+    page, page_index: int, order_start: int, claude_text: str
+) -> List[DocumentBlock]:
+    """Claude document API로 추출한 텍스트를 Tesseract bbox에 매핑.
+
+    1. Tesseract로 단락 bbox 탐지 (위치 정보)
+    2. claude_text를 단락 단위로 분할
+    3. bbox ↔ 텍스트 비례 매핑 → pdf_ocr_span 블록 반환
+    Tesseract 미설치 시: pdf_vision_span으로 폴백 (bbox 없음)
+    """
+    para_bboxes = _get_paragraph_bboxes(page)
+
+    cv_paras = [p.strip() for p in re.split(r"\n{2,}", claude_text) if p.strip()]
+    if not cv_paras:
+        cv_paras = [ln.strip() for ln in claude_text.splitlines() if ln.strip()]
+    if not cv_paras:
+        cv_paras = [claude_text] if claude_text else []
+
+    # Tesseract bbox 없으면 pdf_vision_span으로 폴백
+    if not para_bboxes:
+        result: List[DocumentBlock] = []
+        for idx, para in enumerate(cv_paras):
+            result.append(DocumentBlock(
+                id=f"page-{page_index + 1}-vision-{order_start + idx + 1}",
+                type="pdf_vision_span",
+                sourceText=para,
+                translatedText=None,
+                pageNumber=page_index + 1,
+                bbox=None,
+                order=order_start + idx,
+                metadata={"ocr_engine": "claude_doc", "ocr_confidence": 100},
+            ))
+        return result
+
+    # Tesseract 단락 수(n)에 맞게 Claude 단락(m)을 균등 분배
+    n, m = len(para_bboxes), len(cv_paras)
+    out: List[DocumentBlock] = []
+    for i, (x0, y0, x1, y1, _) in enumerate(para_bboxes):
+        start = round(i * m / n)
+        end   = round((i + 1) * m / n)
+        text  = " ".join(cv_paras[start:end]).strip()
+        if not text:
+            continue
+        font_size = max(6.0, round((y1 - y0) * 0.75, 1))
+        out.append(DocumentBlock(
+            id=f"page-{page_index + 1}-doc-{order_start + i + 1}",
+            type="pdf_ocr_span",        # bbox 있음 → 원위치 교체
+            sourceText=text,
+            translatedText=None,
+            pageNumber=page_index + 1,
+            bbox=(x0, y0, x1, y1),
+            fontSize=font_size,
+            order=order_start + i,
+            metadata={"ocr_engine": "claude_doc", "ocr_confidence": 100},
+        ))
+
+    return out if out else _extract_page_ocr(page, page_index, order_start)
 
 
 def _extract_page_ocr(page, page_index: int, order_start: int) -> List[DocumentBlock]:
