@@ -31,11 +31,13 @@ def export_job(job: TranslationJob, blocks: List[DocumentBlock]) -> Path:
     if job.outputFormat in {"txt", "md"}:
         return export_text(job, blocks, job.outputFormat)
     if job.outputFormat == "pdf":
-        # Vision OCR 블록(bbox 없음)은 별도 텍스트 PDF로 출력
-        has_vision = any(b.type == "pdf_vision_span" for b in blocks)
-        if has_vision:
-            return export_pdf_vision_ocr(job, blocks)
-        return export_pdf_layout_preserving(job, blocks)
+        # bbox가 있는 블록(pdf_text_span / pdf_ocr_span)이 하나라도 있으면
+        # 원위치 교체(layout-preserving) 방식을 우선 사용.
+        # 모든 블록이 pdf_vision_span(bbox 없음)일 때만 하단 오버레이 방식으로 폴백.
+        has_inplace = any(b.type in ("pdf_text_span", "pdf_ocr_span") for b in blocks)
+        if has_inplace:
+            return export_pdf_layout_preserving(job, blocks)
+        return export_pdf_vision_ocr(job, blocks)
     if job.outputFormat in {"doc", "docx"}:
         return export_docx_preserving(job, blocks)
     if job.outputFormat in {"xls", "xlsx"}:
