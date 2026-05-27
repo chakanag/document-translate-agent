@@ -255,9 +255,10 @@ def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List
     """
     import fitz  # type: ignore
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    from app.provider_settings import provider_secret
+    api_key = provider_secret("anthropic", "api_key", "ANTHROPIC_API_KEY")
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다")
+        raise RuntimeError("Anthropic API 키가 설정되지 않았습니다 (config/providers.local.json 또는 ANTHROPIC_API_KEY 환경변수)")
 
     try:
         import anthropic  # type: ignore
