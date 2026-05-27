@@ -62,7 +62,7 @@ def extract_text_blocks(path: Path, file_type: str) -> List[DocumentBlock]:
     return blocks
 
 
-def extract_pdf_blocks(path: Path) -> List[DocumentBlock]:
+def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlock]:
     try:
         import fitz  # type: ignore
     except ImportError as exc:
