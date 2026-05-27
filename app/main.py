@@ -45,7 +45,9 @@ SECURITY_HEADERS: Dict[str, str] = {
         "style-src 'self' 'unsafe-inline'; "
         "frame-src 'self' blob:; "
         "connect-src 'self'; "
-        "img-src 'self' data:;"
+        "img-src 'self' data: blob:; "
+        # PDF.js가 CJK 폰트를 합성할 때 data: / blob: URI를 사용하므로 허용
+        "font-src 'self' data: blob:;"
     ),
 }
 

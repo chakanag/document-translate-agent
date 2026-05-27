@@ -109,12 +109,44 @@ def extension_for(file_name: str) -> str:
 
 def qa_warnings(job: TranslationJob, blocks: List[DocumentBlock]) -> List[str]:
     warnings = []
+
+    # ── 번역문이 완전히 비어있는 블록 ──────────────────────────────────────
     missing = [block.id for block in blocks if block.sourceText.strip() and not (block.translatedText or "").strip()]
     if missing:
-        warnings.append(f"{len(missing)} blocks have no translated text.")
+        warnings.append(f"{len(missing)}개 블록에 번역문이 없습니다.")
+
+    # ── 번역문 == 원문 인 블록 (API 실패로 원문이 그대로 저장된 경우) ────────
+    # 대상 언어가 소스 언어와 다를 때만 체크 (소스 언어 자동 감지 결과 기준)
+    if job.sourceLanguage and job.targetLanguage and job.sourceLanguage != job.targetLanguage:
+        translatable = [
+            b for b in blocks
+            if b.sourceText.strip() and (b.translatedText or "").strip()
+        ]
+        if translatable:
+            unchanged = [
+                b for b in translatable
+                if b.translatedText.strip() == b.sourceText.strip()
+            ]
+            ratio = len(unchanged) / len(translatable)
+            if ratio >= 0.5:
+                # 절반 이상이 원문 그대로면 번역 API 전체 실패로 판단
+                warnings.append(
+                    f"번역 API 오류: 전체 블록의 {round(ratio * 100)}%가 번역되지 않고 원문 그대로입니다. "
+                    f"AI 프로바이더 설정(API 키, 모델명)을 확인하세요."
+                )
+                logger.error(
+                    "[qa_warnings] 번역 미적용 비율 %.1f%% — job=%s provider=%s src=%s tgt=%s",
+                    ratio * 100, job.id, job.aiProvider, job.sourceLanguage, job.targetLanguage,
+                )
+            elif unchanged:
+                warnings.append(
+                    f"{len(unchanged)}개 블록이 번역되지 않고 원문 그대로입니다."
+                )
+
     if job.fileType == "pdf":
         warnings.append(
-            "PDF layout preservation uses text bounding boxes. Image-embedded labels require OCR and may need review."
+            "PDF는 텍스트 위치(bounding box) 기반으로 교체됩니다. "
+            "이미지로 삽입된 텍스트(스캔 PDF 등)는 OCR 없이는 번역되지 않습니다."
         )
     return warnings
 

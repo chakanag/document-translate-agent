@@ -277,6 +277,11 @@ class AnthropicTranslationProvider(TranslationProvider):
             raise RuntimeError(
                 f"Anthropic API 오류 (HTTP {exc.code}) — 모델: {self.model} | {err_msg}"
             ) from exc
+        except urllib.error.URLError as exc:
+            # 네트워크 오류 / 타임아웃 — HTTPError 보다 상위 클래스
+            raise RuntimeError(
+                f"Anthropic API 연결 오류 — 모델: {self.model} | {exc.reason}"
+            ) from exc
         return "".join(
             part.get("text", "")
             for part in payload.get("content", [])
@@ -553,25 +558,35 @@ def translate_blocks(
     # 4) 번역 결과 저장소
     translated_unique: List[Optional[str]] = [None] * total_unique
     done_count = [0]
+    fail_count = [0]   # 번역 API 실패로 원문 유지된 건수
     lock = threading.Lock()
 
     def translate_one_batch(idx_list: List[int]) -> None:
         texts_in_batch = [unique_texts[i] for i in idx_list]
+        local_fails = 0
         try:
             results = provider.translate_batch(texts_in_batch, source_language, target_language)
         except Exception as exc:
-            logger.warning("[translate_blocks] 배치 번역 실패, 개별 fallback: %s", exc)
+            logger.error(
+                "[translate_blocks] 배치 번역 실패 (provider=%s), 개별 재시도: %s",
+                type(provider).__name__, exc,
+            )
             results = []
             for t in texts_in_batch:
                 try:
                     results.append(provider.translate(t, source_language, target_language))
                 except Exception as e2:
-                    logger.warning("[translate_blocks] 개별 번역도 실패, 원문 유지: %s", e2)
+                    logger.error(
+                        "[translate_blocks] 개별 번역도 실패, 원문 유지 (provider=%s): %s",
+                        type(provider).__name__, e2,
+                    )
                     results.append(t)
+                    local_fails += 1
         with lock:
             for i, result in zip(idx_list, results):
                 translated_unique[i] = result
             done_count[0] += len(idx_list)
+            fail_count[0] += local_fails
             if progress_callback:
                 progress_callback(done_count[0], total_unique)
 
@@ -590,6 +605,12 @@ def translate_blocks(
         text = block_list[i].sourceText
         pos  = text_to_idx[text]
         block_list[i].translatedText = translated_unique[pos] or text
+
+    if fail_count[0] > 0:
+        logger.error(
+            "[translate_blocks] 번역 API 실패로 원문 유지된 블록: %d / %d (provider=%s)",
+            fail_count[0], total_unique, type(provider).__name__,
+        )
 
     return block_list
 
