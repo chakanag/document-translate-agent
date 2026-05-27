@@ -255,10 +255,11 @@ def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List
     """
     import fitz  # type: ignore
 
-    from app.provider_settings import provider_secret
+    from app.provider_settings import provider_model as _pm, provider_secret
     api_key = provider_secret("anthropic", "api_key", "ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("Anthropic API 키가 설정되지 않았습니다 (config/providers.local.json 또는 ANTHROPIC_API_KEY 환경변수)")
+    vision_model = _pm("anthropic", "model", "ANTHROPIC_TRANSLATION_MODEL", _VISION_MODEL)
 
     try:
         import anthropic  # type: ignore
@@ -274,7 +275,7 @@ def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List
     client = anthropic.Anthropic(api_key=api_key)
     try:
         response = client.messages.create(
-            model=_VISION_MODEL,
+            model=vision_model,
             max_tokens=4096,
             messages=[{
                 "role": "user",
