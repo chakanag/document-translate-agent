@@ -176,8 +176,9 @@ class AuthRouter:
         except Exception as exc:
             return _json({"error": f"패스키 검증 실패: {exc}"}, 400)
 
-        # 첫 번째 유저이면 admin
+        # 첫 번째 유저이면 admin (즉시 활성), 이후 유저는 승인 대기
         role = "admin" if count_users() == 0 else "user"
+        is_active = role == "admin"
         email = (data.get("email") or "").strip() or None
 
         now = utc_now()
@@ -186,7 +187,7 @@ class AuthRouter:
             username=stored_username,
             email=email,
             role=role,
-            isActive=True,
+            isActive=is_active,
             createdAt=now,
             updatedAt=now,
         )
@@ -200,6 +201,13 @@ class AuthRouter:
             sign_count=verification.sign_count,
             device_name=data.get("deviceName") or None,
         )
+
+        # 승인 대기 유저: 세션 발급 없이 대기 안내
+        if not is_active:
+            return _json({
+                "pending": True,
+                "message": "가입이 완료되었습니다. 관리자 승인 후 로그인하실 수 있습니다.",
+            }, 202)
 
         session = _issue_session(user_id)
         status, headers, payload = _json({"user": user.to_dict()})
@@ -222,7 +230,7 @@ class AuthRouter:
             # 타이밍 공격 방지: 존재하지 않아도 동일 오류
             return _json({"error": "등록되지 않은 사용자이거나 패스키가 없습니다"}, 404)
         if not user.isActive:
-            return _json({"error": "비활성화된 계정입니다"}, 403)
+            return _json({"error": "승인 대기 중인 계정입니다. 관리자에게 문의하세요.", "pending": True}, 403)
 
         creds = get_credentials_by_user(user.id)
         if not creds:

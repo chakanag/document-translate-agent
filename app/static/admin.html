@@ -48,16 +48,29 @@
       .role-admin { background: #e0f4f2; color: var(--accent-strong); }
       .role-user { background: #edf1f4; color: var(--muted); }
 
-      .status-active { color: #1a9e6a; font-weight: 600; }
-      .status-inactive { color: var(--error); font-weight: 600; }
+      .status-active  { color: #1a9e6a; font-weight: 600; }
+      .status-inactive{ color: var(--error); font-weight: 600; }
+      .status-pending { color: #c47f00; font-weight: 600; }
 
       .action-btn {
         min-height: 28px; padding: 0 10px; border-radius: 5px; font-size: 12px;
         cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--ink); margin-right: 4px;
       }
-      .action-btn.danger { border-color: var(--error); color: var(--error); }
+      .action-btn.danger  { border-color: var(--error); color: var(--error); }
       .action-btn.danger:hover { background: var(--error); color: #fff; }
+      .action-btn.approve { border-color: #1a9e6a; color: #1a9e6a; font-weight: 700; }
+      .action-btn.approve:hover { background: #1a9e6a; color: #fff; }
       .action-btn:hover { background: #edf1f4; }
+
+      .row-pending td { background: #fffbeb; }
+      .row-pending:hover td { background: #fff8e1 !important; }
+
+      .pending-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+        background: #e67e00; color: #fff; font-size: 11px; font-weight: 700;
+        margin-left: 6px; vertical-align: middle;
+      }
 
       .empty-row td { text-align: center; color: var(--muted); padding: 24px; }
       .loading-text { color: var(--muted); font-size: 13px; }
@@ -92,6 +105,7 @@
       <div class="stats-grid" id="statsGrid">
         <div class="stat-card"><div class="stat-label">총 유저</div><div class="stat-value" id="statUsers">—</div></div>
         <div class="stat-card"><div class="stat-label">활성 유저</div><div class="stat-value" id="statActiveUsers">—</div></div>
+        <div class="stat-card"><div class="stat-label">승인 대기</div><div class="stat-value" id="statPendingUsers" style="color:#c47f00">—</div></div>
         <div class="stat-card"><div class="stat-label">총 번역 작업</div><div class="stat-value" id="statJobs">—</div></div>
         <div class="stat-card"><div class="stat-label">완료</div><div class="stat-value" id="statCompleted">—</div><div class="stat-sub" id="statSuccessRate"></div></div>
         <div class="stat-card"><div class="stat-label">스토리지</div><div class="stat-value" id="statStorage">—</div><div class="stat-sub">MB 사용 중</div></div>
@@ -100,7 +114,7 @@
       <!-- 유저 목록 -->
       <div class="admin-section">
         <div class="section-header">
-          <h2>유저 관리</h2>
+          <h2>유저 관리 <span class="pending-badge" id="pendingBadge" style="display:none"></span></h2>
           <button class="action-btn" id="refreshUsers">↻ 새로고침</button>
         </div>
         <table class="data-table">

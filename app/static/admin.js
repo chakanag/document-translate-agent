@@ -20,6 +20,8 @@ async function loadStats() {
   const d = await res.json();
   document.getElementById("statUsers").textContent = d.totalUsers;
   document.getElementById("statActiveUsers").textContent = d.activeUsers;
+  const pendingEl = document.getElementById("statPendingUsers");
+  if (pendingEl) pendingEl.textContent = (d.totalUsers - d.activeUsers) || 0;
   document.getElementById("statJobs").textContent = d.totalJobs;
   const completed = d.jobsByStatus?.completed || 0;
   document.getElementById("statCompleted").textContent = completed;
@@ -38,12 +40,28 @@ async function loadUsers() {
     tbody.innerHTML = `<tr class="empty-row"><td colspan="6">유저가 없습니다</td></tr>`;
     return;
   }
-  tbody.innerHTML = users.map((u) => `
-    <tr data-id="${u.id}">
+
+  // 승인 대기(비활성) 유저를 상단 배치
+  const sorted = [...users].sort((a, b) => {
+    if (!a.isActive && b.isActive) return -1;
+    if (a.isActive && !b.isActive) return 1;
+    return 0;
+  });
+
+  // 승인 대기 수 뱃지 업데이트
+  const pendingCount = users.filter(u => !u.isActive).length;
+  const badge = document.getElementById("pendingBadge");
+  if (badge) {
+    badge.textContent = pendingCount || "";
+    badge.style.display = pendingCount ? "inline-flex" : "none";
+  }
+
+  tbody.innerHTML = sorted.map((u) => `
+    <tr data-id="${u.id}" class="${!u.isActive ? "row-pending" : ""}">
       <td><strong>${esc(u.username)}</strong></td>
       <td>${esc(u.email || "—")}</td>
       <td><span class="role-badge role-${u.role}">${u.role}</span></td>
-      <td><span class="${u.isActive ? "status-active" : "status-inactive"}">${u.isActive ? "활성" : "비활성"}</span></td>
+      <td><span class="${u.isActive ? "status-active" : "status-pending"}">${u.isActive ? "활성" : "승인 대기"}</span></td>
       <td>${fmtDate(u.createdAt)}</td>
       <td>
         ${u.id !== currentUser?.id ? `
@@ -53,11 +71,11 @@ async function loadUsers() {
             data-role="${u.role}">
             ${u.role === "admin" ? "일반 유저로" : "Admin으로"}
           </button>
-          <button class="action-btn"
+          <button class="action-btn ${!u.isActive ? "approve" : ""}"
             data-action="toggle-active"
             data-id="${u.id}"
             data-active="${u.isActive}">
-            ${u.isActive ? "비활성화" : "활성화"}
+            ${u.isActive ? "비활성화" : "✅ 승인"}
           </button>
           <button class="action-btn danger"
             data-action="remove-user"

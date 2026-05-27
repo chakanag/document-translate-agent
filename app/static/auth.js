@@ -102,8 +102,16 @@ document.getElementById("registerForm").addEventListener("submit", async (e) => 
     const completeData = await completeRes.json();
     if (!completeRes.ok) throw new Error(completeData.error || "등록 완료 실패");
 
-    setMsg("registerMsg", "✅ 가입 완료! 메인 화면으로 이동합니다...");
-    setTimeout(() => { location.href = "/"; }, 1200);
+    if (completeData.pending) {
+      // 승인 대기 상태 — 로그인 탭으로 전환하지 않고 안내 메시지 표시
+      document.getElementById("registerForm").style.display = "none";
+      setMsg("registerMsg",
+        "✅ 패스키 등록 완료! 관리자 승인 후 로그인하실 수 있습니다.<br>" +
+        "승인이 완료되면 로그인 탭에서 패스키로 로그인하세요.");
+    } else {
+      setMsg("registerMsg", "✅ 가입 완료! 메인 화면으로 이동합니다...");
+      setTimeout(() => { location.href = "/"; }, 1200);
+    }
   } catch (err) {
     setMsg("registerMsg", err.message || "오류가 발생했습니다", true);
     setLoading("registerBtn", false);
@@ -126,7 +134,15 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
       body: JSON.stringify({ username }),
     });
     const beginData = await beginRes.json();
-    if (!beginRes.ok) throw new Error(beginData.error || "로그인 시작 실패");
+    if (!beginRes.ok) {
+      if (beginRes.status === 403 && beginData.pending) {
+        setMsg("loginMsg",
+          "⏳ 아직 관리자 승인 대기 중입니다.<br>승인 후 다시 시도해 주세요.", true);
+        setLoading("loginBtn", false);
+        return;
+      }
+      throw new Error(beginData.error || "로그인 시작 실패");
+    }
 
     const challenge = beginData.challenge;
 
