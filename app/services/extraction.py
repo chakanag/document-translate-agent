@@ -20,8 +20,8 @@ _OCR_ZOOM = 2.0
 _OCR_MIN_CONF = 30
 # Tesseract 언어팩: 일본어·영어·중국어(간체)·중국어(번체)·한국어
 _OCR_LANG = "jpn+eng+chi_sim+chi_tra+kor"
-# Claude Vision OCR 모델 (Haiku: 저비용, 고속)
-_VISION_MODEL = "claude-haiku-4-5"
+# Claude Vision OCR 모델 (translation.py와 동일한 haiku 모델 사용)
+_VISION_MODEL = "claude-haiku-4-5-20251001"
 
 
 def extract_blocks(path: Path, file_type: str, ocr_engine: str = "none") -> List[DocumentBlock]:
@@ -264,16 +264,17 @@ def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List
     except ImportError as exc:
         raise RuntimeError("anthropic 패키지가 필요합니다: pip install anthropic") from exc
 
-    # 1.5× 해상도로 JPEG 렌더링 (파일 크기/토큰 절약)
-    mat = fitz.Matrix(1.5, 1.5)
+    # 2.0× 해상도 PNG 렌더링 (JPEG 압축 없이 선명하게)
+    mat = fitz.Matrix(2.0, 2.0)
     pix = page.get_pixmap(matrix=mat, alpha=False)
-    img_b64 = base64.standard_b64encode(pix.tobytes("jpeg")).decode()
+    img_bytes = pix.tobytes("png")
+    img_b64 = base64.standard_b64encode(img_bytes).decode()
 
     client = anthropic.Anthropic(api_key=api_key)
     try:
         response = client.messages.create(
             model=_VISION_MODEL,
-            max_tokens=2048,
+            max_tokens=4096,
             messages=[{
                 "role": "user",
                 "content": [
@@ -281,16 +282,21 @@ def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/jpeg",
+                            "media_type": "image/png",
                             "data": img_b64,
                         },
                     },
                     {
                         "type": "text",
                         "text": (
-                            "이 이미지의 모든 텍스트를 OCR로 정확히 추출해주세요. "
-                            "원본 텍스트만 출력하고, 단락은 빈 줄로 구분하세요. "
-                            "설명·주석은 추가하지 마세요."
+                            "Extract all text from this image exactly as it appears. "
+                            "Rules:\n"
+                            "- Output ONLY the raw text, no explanations or comments\n"
+                            "- Preserve original language (Japanese, Chinese, Korean, etc.)\n"
+                            "- Preserve numbers, punctuation, and symbols exactly\n"
+                            "- For vertical Japanese text, output each column left-to-right\n"
+                            "- Separate distinct text blocks with a blank line\n"
+                            "- Do NOT translate, summarize, or add markdown formatting"
                         ),
                     },
                 ],
@@ -298,8 +304,10 @@ def _extract_page_claude_vision(page, page_index: int, order_start: int) -> List
         )
         ocr_text = response.content[0].text.strip()
     except Exception as exc:
+        logger.error("[Vision OCR] 페이지 %d API 실패: %s", page_index + 1, exc)
         raise RuntimeError(f"Claude Vision API 호출 실패: {exc}") from exc
 
+    logger.info("[Vision OCR] 페이지 %d 추출 완료: %d chars", page_index + 1, len(ocr_text))
     paragraphs = [p.strip() for p in re.split(r"\n{2,}", ocr_text) if p.strip()]
     if not paragraphs and ocr_text:
         paragraphs = [ocr_text]
