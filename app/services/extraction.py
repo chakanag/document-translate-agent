@@ -132,17 +132,22 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
                 page_index + 1, page_char_count, ocr_engine,
             )
             try:
+                page_num = page_index + 1
                 if ocr_engine == "tesseract":
                     ocr_blocks = _extract_page_ocr(page, page_index, order)
-                elif doc_page_texts.get(page_index + 1):
-                    # 전체 PDF 사전 추출 텍스트를 Tesseract bbox에 매핑
-                    logger.warning("[OCR] 페이지 %d: document API 텍스트 사용", page_index + 1)
+                elif page_num in doc_page_texts and doc_page_texts[page_num]:
+                    # 사전 추출 텍스트 있음 → Tesseract bbox에 매핑
+                    logger.warning("[OCR] 페이지 %d: document API 텍스트 사용", page_num)
                     ocr_blocks = _map_claude_text_to_bboxes(
-                        page, page_index, order, doc_page_texts[page_index + 1]
+                        page, page_index, order, doc_page_texts[page_num]
                     )
+                elif page_num in doc_page_texts:
+                    # 사전 추출에서 blank로 확인된 페이지 → Vision API 불필요
+                    logger.warning("[OCR] 페이지 %d: document API 확인 공백 페이지, 건너뜀", page_num)
+                    ocr_blocks = []
                 else:
-                    # 사전 추출 실패 → 페이지별 Vision API 폴백
-                    logger.warning("[OCR] 페이지 %d: 사전 추출 없음, Vision API 폴백", page_index + 1)
+                    # 배치 실패로 미처리 → 페이지별 Vision API 폴백
+                    logger.warning("[OCR] 페이지 %d: 배치 미처리, Vision API 폴백", page_num)
                     ocr_blocks = _extract_page_claude_vision(page, page_index, order)
 
                 if ocr_blocks:
@@ -150,7 +155,9 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
                     order += len(ocr_blocks)
                     continue
                 else:
-                    logger.warning("[OCR] 페이지 %d: OCR 결과 없음", page_index + 1)
+                    # 결과 없음 = blank 페이지 또는 OCR 실패 → 다음 페이지로
+                    logger.warning("[OCR] 페이지 %d: OCR 결과 없음 (blank 또는 실패)", page_index + 1)
+                    continue
             except Exception as exc:
                 logger.warning("[OCR] 페이지 %d 처리 실패: %s", page_index + 1, exc)
 
@@ -267,6 +274,7 @@ def _fetch_pdf_claude_doc(path: Path, page_count: int) -> dict:
             )
 
             # 로컬 페이지 번호(1-based) → 전역 페이지 번호로 변환 후 저장
+            # blank 페이지도 ""로 저장 → "배치 실패(키 없음)"와 구분
             marker_re = re.compile(r"===\s*PAGE\s+(\d+)\s*===", re.IGNORECASE)
             parts = marker_re.split(raw_text)
             i = 1
@@ -277,10 +285,20 @@ def _fetch_pdf_claude_doc(path: Path, page_count: int) -> dict:
                     i += 2
                     continue
                 text = parts[i + 1].strip()
-                if text.lower() not in {"(blank)", ""}:
-                    global_page = batch_start + local_page
-                    all_page_texts[global_page] = text
+                global_page = batch_start + local_page
+                # blank → "" 저장, 내용 있으면 그대로 저장
+                all_page_texts[global_page] = "" if text.lower() in {"(blank)", ""} else text
                 i += 2
+
+            # API 응답에 마커가 전혀 없는 경우 (1페이지 배치 등) 안전 처리
+            if not any(batch_start < p <= batch_end for p in all_page_texts):
+                # 파싱 실패 시 전체 raw_text를 첫 번째 페이지 텍스트로 사용
+                if raw_text and raw_text.lower() not in {"(blank)", ""}:
+                    all_page_texts[batch_start + 1] = raw_text
+                    logger.warning(
+                        "[PDF Doc API] 배치 p%d~p%d: PAGE 마커 없음, 전체 텍스트를 p%d에 할당",
+                        batch_start + 1, batch_end, batch_start + 1,
+                    )
 
     finally:
         src_doc.close()
