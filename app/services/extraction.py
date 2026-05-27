@@ -122,44 +122,67 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
                     )
                 )
 
-        # ── 스캔 페이지 감지 → OCR 분기 ──────────────────────────────────
+        # ── 페이지 처리 분기 ────────────────────────────────────────────
         page_char_count = sum(len(b.sourceText) for b in page_text_blocks)
         is_scanned = page_char_count < _OCR_CHAR_THRESHOLD
+        page_num = page_index + 1
 
-        if is_scanned and ocr_engine in {"tesseract", "claude_vision"}:
+        if ocr_engine == "claude_vision":
+            # ── claude_vision 모드: document API 텍스트 우선 사용 ──────────
+            # is_scanned 여부와 무관하게 document API 텍스트가 있으면 사용
+            # (pages 3+ 처럼 embedded chars ≥ 20 이어도 OCR 품질이 더 좋음)
+            if page_num in doc_page_texts:
+                doc_text = doc_page_texts[page_num]
+                if doc_text:
+                    logger.warning(
+                        "[OCR] 페이지 %d: document API 텍스트 사용 (embedded_chars=%d)",
+                        page_num, page_char_count,
+                    )
+                    try:
+                        ocr_blocks = _map_claude_text_to_bboxes(page, page_index, order, doc_text)
+                        if ocr_blocks:
+                            blocks.extend(ocr_blocks)
+                            order += len(ocr_blocks)
+                            continue
+                    except Exception as exc:
+                        logger.warning("[OCR] 페이지 %d bbox 매핑 실패: %s", page_num, exc)
+                else:
+                    # Document API가 blank로 확인 → OCR 불필요, 다음 페이지로
+                    logger.warning("[OCR] 페이지 %d: document API 확인 공백, 건너뜀", page_num)
+                    continue
+            elif is_scanned:
+                # document API 미처리 + 스캔 감지 → 페이지별 Vision API 폴백
+                logger.warning(
+                    "[OCR] 페이지 %d: 배치 미처리 + 스캔 감지, Vision API 폴백 (chars=%d)",
+                    page_num, page_char_count,
+                )
+                try:
+                    ocr_blocks = _extract_page_claude_vision(page, page_index, order)
+                    if ocr_blocks:
+                        blocks.extend(ocr_blocks)
+                        order += len(ocr_blocks)
+                        continue
+                except Exception as exc:
+                    logger.warning("[OCR] 페이지 %d Vision API 실패: %s", page_num, exc)
+            else:
+                logger.warning(
+                    "[OCR] 페이지 %d: document API 미포함, embedded 텍스트 사용 (chars=%d)",
+                    page_num, page_char_count,
+                )
+
+        elif is_scanned and ocr_engine == "tesseract":
             logger.warning(
-                "[OCR] 페이지 %d 스캔 감지 (chars=%d) → %s",
-                page_index + 1, page_char_count, ocr_engine,
+                "[OCR] 페이지 %d 스캔 감지 (chars=%d) → tesseract",
+                page_num, page_char_count,
             )
             try:
-                page_num = page_index + 1
-                if ocr_engine == "tesseract":
-                    ocr_blocks = _extract_page_ocr(page, page_index, order)
-                elif page_num in doc_page_texts and doc_page_texts[page_num]:
-                    # 사전 추출 텍스트 있음 → Tesseract bbox에 매핑
-                    logger.warning("[OCR] 페이지 %d: document API 텍스트 사용", page_num)
-                    ocr_blocks = _map_claude_text_to_bboxes(
-                        page, page_index, order, doc_page_texts[page_num]
-                    )
-                elif page_num in doc_page_texts:
-                    # 사전 추출에서 blank로 확인된 페이지 → Vision API 불필요
-                    logger.warning("[OCR] 페이지 %d: document API 확인 공백 페이지, 건너뜀", page_num)
-                    ocr_blocks = []
-                else:
-                    # 배치 실패로 미처리 → 페이지별 Vision API 폴백
-                    logger.warning("[OCR] 페이지 %d: 배치 미처리, Vision API 폴백", page_num)
-                    ocr_blocks = _extract_page_claude_vision(page, page_index, order)
-
+                ocr_blocks = _extract_page_ocr(page, page_index, order)
                 if ocr_blocks:
                     blocks.extend(ocr_blocks)
                     order += len(ocr_blocks)
                     continue
-                else:
-                    # 결과 없음 = blank 페이지 또는 OCR 실패 → 다음 페이지로
-                    logger.warning("[OCR] 페이지 %d: OCR 결과 없음 (blank 또는 실패)", page_index + 1)
-                    continue
             except Exception as exc:
-                logger.warning("[OCR] 페이지 %d 처리 실패: %s", page_index + 1, exc)
+                logger.warning("[OCR] 페이지 %d Tesseract 실패: %s", page_num, exc)
 
         blocks.extend(page_text_blocks)
         order += len(page_text_blocks)
