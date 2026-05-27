@@ -128,32 +128,27 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
         page_num = page_index + 1
 
         if ocr_engine == "claude_vision":
-            # ── claude_vision 모드: document API 텍스트 우선 사용 ──────────
-            # is_scanned 여부와 무관하게 document API 텍스트가 있으면 사용
-            # (pages 3+ 처럼 embedded chars ≥ 20 이어도 OCR 품질이 더 좋음)
+            # ── claude_vision 모드 ───────────────────────────────────────
+            # is_scanned, embedded_chars 무관하게 doc API 텍스트 우선 사용.
+            # Tesseract bbox 의존 없이 pdf_vision_span 블록으로 직접 생성.
             if page_num in doc_page_texts:
                 doc_text = doc_page_texts[page_num]
                 if doc_text:
+                    ai_blocks = _doc_text_to_vision_spans(doc_text, page_num, order)
                     logger.warning(
-                        "[OCR] 페이지 %d: document API 텍스트 사용 (embedded_chars=%d)",
-                        page_num, page_char_count,
+                        "[OCR] 페이지 %d: doc API → %d 블록 (embedded_chars=%d)",
+                        page_num, len(ai_blocks), page_char_count,
                     )
-                    try:
-                        ocr_blocks = _map_claude_text_to_bboxes(page, page_index, order, doc_text)
-                        if ocr_blocks:
-                            blocks.extend(ocr_blocks)
-                            order += len(ocr_blocks)
-                            continue
-                    except Exception as exc:
-                        logger.warning("[OCR] 페이지 %d bbox 매핑 실패: %s", page_num, exc)
+                    blocks.extend(ai_blocks)
+                    order += len(ai_blocks)
                 else:
-                    # Document API가 blank로 확인 → OCR 불필요, 다음 페이지로
-                    logger.warning("[OCR] 페이지 %d: document API 확인 공백, 건너뜀", page_num)
-                    continue
-            elif is_scanned:
-                # document API 미처리 + 스캔 감지 → 페이지별 Vision API 폴백
+                    logger.warning("[OCR] 페이지 %d: doc API 확인 공백, 건너뜀", page_num)
+                continue  # doc API가 처리(blank 포함) → 반드시 continue
+
+            # doc API 미포함: 스캔 감지 시 Vision API 폴백, 아니면 PyMuPDF
+            if is_scanned:
                 logger.warning(
-                    "[OCR] 페이지 %d: 배치 미처리 + 스캔 감지, Vision API 폴백 (chars=%d)",
+                    "[OCR] 페이지 %d: 배치 미처리+스캔, Vision API 폴백 (chars=%d)",
                     page_num, page_char_count,
                 )
                 try:
@@ -166,7 +161,7 @@ def extract_pdf_blocks(path: Path, ocr_engine: str = "none") -> List[DocumentBlo
                     logger.warning("[OCR] 페이지 %d Vision API 실패: %s", page_num, exc)
             else:
                 logger.warning(
-                    "[OCR] 페이지 %d: document API 미포함, embedded 텍스트 사용 (chars=%d)",
+                    "[OCR] 페이지 %d: doc API 미포함, PyMuPDF 텍스트 사용 (chars=%d)",
                     page_num, page_char_count,
                 )
 
@@ -331,6 +326,35 @@ def _fetch_pdf_claude_doc(path: Path, page_count: int) -> dict:
         len(all_page_texts), page_count,
     )
     return all_page_texts
+
+
+def _doc_text_to_vision_spans(text: str, page_num: int, order_start: int) -> List[DocumentBlock]:
+    """Claude document API 추출 텍스트를 pdf_vision_span 블록 리스트로 변환.
+
+    Tesseract/bbox 없이 동작. 단락 단위로 분할 후 각각을 번역 블록으로 생성.
+    export 단계에서 원본 페이지 위에 번역 텍스트가 오버레이됩니다.
+    """
+    paras = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    if not paras:
+        paras = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not paras and text.strip():
+        paras = [text.strip()]
+
+    result: List[DocumentBlock] = []
+    for idx, para in enumerate(paras):
+        if not para:
+            continue
+        result.append(DocumentBlock(
+            id=f"page-{page_num}-docapi-{order_start + idx + 1}",
+            type="pdf_vision_span",
+            sourceText=para,
+            translatedText=None,
+            pageNumber=page_num,
+            bbox=None,
+            order=order_start + idx,
+            metadata={"ocr_engine": "claude_doc", "ocr_confidence": 100},
+        ))
+    return result
 
 
 def _map_claude_text_to_bboxes(
