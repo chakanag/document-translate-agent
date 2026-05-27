@@ -192,8 +192,13 @@ def export_pdf_vision_ocr(job: TranslationJob, blocks: List[DocumentBlock]) -> P
 
         combined_text = "\n\n".join(b.translatedText or "" for b in blks if b.translatedText)
         if combined_text:
+            # overlay_rect.inflate(-8) — PyMuPDF 1.24+에서 제거됨 → 직접 계산
+            inner_rect = fitz.Rect(
+                overlay_rect.x0 + 8, overlay_rect.y0 + 8,
+                overlay_rect.x1 - 8, overlay_rect.y1 - 8,
+            )
             new_page.insert_textbox(
-                overlay_rect.inflate(-8),
+                inner_rect,
                 combined_text,
                 fontsize=9,
                 fontname=fontname,
